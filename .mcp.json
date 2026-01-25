@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "apple2-mcp": {
+      "command": "python3",
+      "args": ["-m", "apple2_mcp.server"],
+      "cwd": "<path to apple2agent>/src",
+      "env": {
+        "PYTHONPATH": "<path to apple2agent>/src"
+      }
+    }
+  }
+}

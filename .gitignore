@@ -1,0 +1,42 @@
+# Build artifacts
+build/
+*.o
+*.bin
+
+# Bobbin emulator (build from source or download)
+bobbin/src/bobbin
+
+# Apple II ROMs (copyrighted - obtain separately)
+bobbin/src/roms/
+
+# Disk images (except templates)
+disks/*.dsk
+!disks/ProDOS_2_4.dsk
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.eggs/
+*.egg-info/
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude artifacts
+.claude/
+
+# Environment files (API keys)
+.env
+.env.*
+*.env
