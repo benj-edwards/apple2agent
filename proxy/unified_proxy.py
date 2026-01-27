@@ -468,15 +468,18 @@ class AppleIISession:
         if command == 'HELP':
             self._send_response(
                 "/HELP - SHOW COMMANDS\n"
+                "/AGENT - TOGGLE CLAUDE CODE MODE\n"
+                "/SUSPEND - DROP TO BASIC (RUN YOUR PROGRAM)\n"
                 "/CODE <DESC> - GENERATE BASIC\n"
                 "/CHAT <MSG> - CHAT WITH CLAUDE\n"
-                "/AGENT - TOGGLE AGENTIC MODE\n"
                 "/TURNS <N> - SET MAX AGENT TURNS\n"
                 "/HISTORY - TOGGLE CONVERSATION MEMORY\n"
                 "/CLEAR - CLEAR CONVERSATION\n"
                 "/PROMPT <TEXT> - SET SYSTEM PROMPT\n"
                 "/IP - SHOW CONNECTION INFO"
             )
+        elif command == 'SUSPEND':
+            self._handle_suspend()
         elif command == 'AGENT':
             self._toggle_agentic_mode()
         elif command == 'TURNS':
@@ -583,6 +586,32 @@ class AppleIISession:
         for packet in packets:
             self._send(packet)
 
+    def _handle_suspend(self):
+        """Handle /SUSPEND - drop to BASIC prompt."""
+        self._send_status("SUSPENDING...")
+        # Send suspend command - Apple II client will drop to BASIC
+        # The connection stays open, context preserved
+        suspend_msg = (
+            "\n"
+            "================================\n"
+            "   CLAUDE CODE SUSPENDED\n"
+            "================================\n"
+            "\n"
+            "YOUR PROGRAM IS LOADED!\n"
+            "TYPE: RUN\n"
+            "\n"
+            "TO RESUME CLAUDE CODE:\n"
+            "  CTRL-C CTRL-C  OR\n"
+            "  CALL 24576     (CALL $6000)\n"
+            "\n"
+            "================================\n"
+        )
+        self._send_response(suspend_msg)
+        # Send special suspend packet (type 0x10)
+        suspend_packet = self.proto.encode_suspend()
+        self._send(suspend_packet)
+        print(f"[Session] Suspended to BASIC")
+
     def _toggle_agentic_mode(self):
         """Toggle agentic mode on/off."""
         self.agentic_mode = not self.agentic_mode
@@ -594,15 +623,29 @@ class AppleIISession:
                     send_to_apple2=self._send_response,
                     send_status=self._send_status,
                     send_code=self._send_basic_code,
-                    mcp_call=self.mcp_call
+                    mcp_call=self.mcp_call,
+                    send_binary=self._send_binary_code
                 )
-            self._send_response("AGENTIC MODE ON\nCLAUDE CAN NOW USE TOOLS\nAND WORK WITH EMULATOR")
-            self._send_status("AGENT READY")
-            print(f"[Session] Agentic mode enabled")
+            welcome = (
+                "================================\n"
+                "    CLAUDE CODE FOR //E\n"
+                "================================\n"
+                "\n"
+                "AI-POWERED PROGRAMMING\n"
+                "DESCRIBE WHAT YOU WANT!\n"
+                "\n"
+                "/SUSPEND - RUN YOUR PROGRAM\n"
+                "/CLEAR   - NEW CONVERSATION\n"
+                "/HELP    - ALL COMMANDS\n"
+                "================================\n"
+            )
+            self._send_response(welcome)
+            self._send_status("CLAUDE CODE READY")
+            print(f"[Session] Claude Code mode enabled")
         else:
-            self._send_response("AGENTIC MODE OFF\nBACK TO NORMAL CHAT")
+            self._send_response("CLAUDE CODE OFF\nBACK TO NORMAL CHAT")
             self._send_status("CHAT MODE")
-            print(f"[Session] Agentic mode disabled")
+            print(f"[Session] Claude Code mode disabled")
 
     def _agentic_response(self, message: str):
         """Handle message in agentic mode."""
@@ -645,6 +688,30 @@ class AppleIISession:
             self._send_status("CODE LOADED - TYPE RUN")
         except Exception as e:
             self._send_error(f"CODE ERROR: {str(e)[:40]}")
+
+    def _send_binary_code(self, hex_data: str, load_address: int = 0x6000):
+        """Send machine code to Apple II (used by agentic mode)."""
+        try:
+            # Convert hex string to bytes
+            hex_clean = hex_data.replace(" ", "").replace("\n", "")
+            binary = bytes.fromhex(hex_clean)
+            size = len(binary)
+
+            self._send_status(f"BINARY: {size} BYTES @ ${load_address:04X}")
+
+            # Send binary packets (similar to code packets but with address)
+            chunk_size = MAX_DATA_SIZE - 4  # Leave room for address header
+            offset = 0
+            while offset < size:
+                chunk = binary[offset:offset + chunk_size]
+                packet = self.proto.encode_binary(chunk, load_address + offset, size)
+                self._send(packet)
+                time.sleep(0.01)
+                offset += len(chunk)
+
+            self._send_status(f"READY - CALL {load_address}")
+        except Exception as e:
+            self._send_error(f"BINARY ERROR: {str(e)[:40]}")
 
 
 class UnifiedProxy:

@@ -50,6 +50,9 @@ class PacketType(IntEnum):
     STATUS = 0x04  # Status message
     ACK = 0x05     # Acknowledgment
     NACK = 0x06    # Request retransmit
+    BINARY = 0x07  # Machine code binary chunk
+    SUSPEND = 0x10 # Suspend to BASIC/ProDOS
+    RESUME = 0x11  # Resume from suspend
     ERR = 0x0F     # Error message
 
 
@@ -183,6 +186,22 @@ class A2PProtocol:
         """Create ERR packet with error message."""
         data = message[:MAX_DATA_SIZE].encode('ascii', errors='replace')
         return self.encode(PacketType.ERR, data)
+
+    def encode_suspend(self) -> bytes:
+        """Create SUSPEND packet to drop to BASIC."""
+        return self.encode(PacketType.SUSPEND, b'')
+
+    def encode_resume(self) -> bytes:
+        """Create RESUME packet to return from BASIC."""
+        return self.encode(PacketType.RESUME, b'')
+
+    def encode_binary(self, chunk: bytes, address: int, total: int) -> bytes:
+        """Create BINARY packet with machine code chunk.
+
+        Header: address(2) + total(2) + chunk_data
+        """
+        header = struct.pack('<HH', address, total)
+        return self.encode(PacketType.BINARY, header + chunk)
 
     def decode_packet(self, data: bytes) -> Optional[Packet]:
         """

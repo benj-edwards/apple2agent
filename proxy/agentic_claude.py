@@ -190,6 +190,56 @@ APPLE2_TOOLS = [
             },
             "required": ["status"]
         }
+    },
+    {
+        "name": "emulator_assemble",
+        "description": "Assemble 6502 assembly code and inject into emulator. Returns the load address. Use this for machine language programs.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source": {
+                    "type": "string",
+                    "description": "6502 assembly source code (ca65 format)"
+                },
+                "load_address": {
+                    "type": "integer",
+                    "description": "Load address (default: $6000 = 24576)"
+                }
+            },
+            "required": ["source"]
+        }
+    },
+    {
+        "name": "emulator_call",
+        "description": "Call a machine language routine at an address. The routine should end with RTS.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "address": {
+                    "type": "integer",
+                    "description": "Address to call (JSR)"
+                }
+            },
+            "required": ["address"]
+        }
+    },
+    {
+        "name": "apple2_send_binary",
+        "description": "Send assembled machine code to the REAL Apple II. Specify load address.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "hex_data": {
+                    "type": "string",
+                    "description": "Assembled binary as hex string"
+                },
+                "load_address": {
+                    "type": "integer",
+                    "description": "Address to load code (default: $6000)"
+                }
+            },
+            "required": ["hex_data"]
+        }
     }
 ]
 
@@ -207,18 +257,21 @@ class AgenticClaude:
                  send_to_apple2: Callable[[str], None],
                  send_status: Callable[[str], None],
                  send_code: Callable[[str], None],
-                 mcp_call: Optional[Callable[[str, dict], Any]] = None):
+                 mcp_call: Optional[Callable[[str, dict], Any]] = None,
+                 send_binary: Optional[Callable[[str, int], None]] = None):
         """
         Args:
             send_to_apple2: Function to send response text to real Apple II
             send_status: Function to send status updates to real Apple II
             send_code: Function to send BASIC code to real Apple II
             mcp_call: Function to call MCP tools (for emulator)
+            send_binary: Function to send machine code to real Apple II
         """
         self.send_to_apple2 = send_to_apple2
         self.send_status = send_status
         self.send_code = send_code
         self.mcp_call = mcp_call
+        self.send_binary = send_binary
 
         self.client = None
         if HAS_ANTHROPIC:
@@ -228,6 +281,10 @@ class AgenticClaude:
 
         self.conversation: List[Dict] = []
         self.emulator_running = False
+
+        # Store last assembled binary for deployment
+        self.last_binary: Optional[str] = None
+        self.last_binary_addr: int = 0x6000
 
         # Context management - compact when approaching limit
         self.max_context_tokens = 150000  # Leave headroom for 200k context
@@ -312,6 +369,53 @@ class AgenticClaude:
             status = tool_input.get("status", "")
             self.send_status(status)
             return "Status sent to Apple II"
+
+        elif tool_name == "apple2_send_binary":
+            hex_data = tool_input.get("hex_data", "")
+            load_addr = tool_input.get("load_address", 0x6000)
+            if self.send_binary:
+                self.send_binary(hex_data, load_addr)
+                return f"Binary sent to Apple II at ${load_addr:04X}"
+            else:
+                return "ERROR: Binary send not available"
+
+        elif tool_name == "emulator_assemble":
+            if not self.mcp_call:
+                return "ERROR: Emulator not available (no MCP connection)"
+            source = tool_input.get("source", "")
+            load_addr = tool_input.get("load_address", 0x6000)
+            try:
+                # Assemble the code
+                result = self.mcp_call("mcp__apple2-mcp__assemble", {
+                    "source": source,
+                    "load_address": load_addr
+                })
+                if isinstance(result, dict) and "hex" in result:
+                    hex_data = result["hex"]
+                    # Load into emulator memory
+                    self.mcp_call("mcp__apple2-mcp__load_binary", {
+                        "address": load_addr,
+                        "hex_data": hex_data
+                    })
+                    # Store for later deployment
+                    self.last_binary = hex_data
+                    self.last_binary_addr = load_addr
+                    size = len(hex_data.replace(" ", "")) // 2
+                    return f"Assembled {size} bytes at ${load_addr:04X}. Use CALL {load_addr} to run."
+                else:
+                    return f"Assembly error: {result}"
+            except Exception as e:
+                return f"ERROR: {str(e)}"
+
+        elif tool_name == "emulator_call":
+            if not self.mcp_call:
+                return "ERROR: Emulator not available (no MCP connection)"
+            address = tool_input.get("address", 0x6000)
+            try:
+                result = self.mcp_call("mcp__apple2-mcp__call", {"address": address})
+                return f"Called ${address:04X}: {result}"
+            except Exception as e:
+                return f"ERROR: {str(e)}"
 
         else:
             return f"ERROR: Unknown tool: {tool_name}"
@@ -441,30 +545,67 @@ Be concise but preserve important technical details."""
             "content": user_message
         })
 
-        system_prompt = """You are an expert Apple II programmer with access to both a Bobbin emulator and a real Apple II.
+        system_prompt = """You are Claude Code for Apple II - an expert AI programmer that creates and tests code.
 
-WORKFLOW:
-1. Use the EMULATOR tools to develop and test code quickly
-2. Once code works in the emulator, use apple2_send_code to deploy to the real Apple II
-3. Send status updates to keep the user informed
+CHOOSING LANGUAGE:
+- If user says "BASIC" or doesn't specify: use Applesoft BASIC
+- If user says "assembly", "machine language", "ML", "6502", "fast": use 6502 assembly
+- For games that need speed (shooters, action): suggest assembly
+- For utilities, demos, simple programs: BASIC is fine
 
-EMULATOR TOOLS (fast, use for development):
-- emulator_boot: Start the emulator
-- emulator_type: Type commands
-- emulator_read_screen: See what's on screen
+WORKFLOW - Follow this pattern for EVERY request:
+1. PLAN: Describe what you'll build (show "PLANNING: <description>")
+2. CODE: Write the program (show "WRITING: <what>")
+3. TEST: Run it in emulator (show "TESTING...")
+4. FIX: If bugs, fix and retest (show "FIXING: <issue>")
+5. DEPLOY: Send to real Apple II (show "DEPLOYING...")
+6. CONFIRM: Tell user it's ready (show "READY!")
+
+DETAILED STATUS UPDATES - User sees these in real-time:
+- "BOOTING EMULATOR..."
+- "PLANNING: SPACE INVADERS IN 6502"
+- "WRITING: SPRITE ROUTINES"
+- "WRITING: COLLISION DETECTION"
+- "ASSEMBLING 847 BYTES..."
+- "TESTING IN EMULATOR..."
+- "BUG: SPRITE FLICKER"
+- "FIXING: DOUBLE BUFFER"
+- "TEST PASSED!"
+- "DEPLOYING TO APPLE II..."
+- "READY! TYPE /SUSPEND THEN CALL 24576"
+
+BASIC TOOLS:
+- emulator_inject_basic: Load BASIC program
 - emulator_run_basic: Run BASIC commands
-- emulator_inject_basic: Load a BASIC program
-- emulator_capture_graphics: See graphics output
-- emulator_peek/poke: Read/write memory
+- apple2_send_code: Deploy BASIC to Apple II
 
-REAL APPLE II TOOLS (for deployment):
-- apple2_send_code: Deploy tested BASIC code
+ASSEMBLY/MACHINE LANGUAGE TOOLS:
+- emulator_assemble: Assemble 6502 code, load into emulator
+- emulator_call: Execute machine code routine
+- apple2_send_binary: Deploy binary to Apple II
+
+COMMON TOOLS:
+- emulator_boot: Start emulator (ALWAYS do first!)
+- emulator_read_screen: Check text output
+- emulator_capture_graphics: See graphics (gr/hgr)
+- emulator_peek/poke: Debug memory
+- apple2_send_status: Update status line (USE OFTEN!)
 - apple2_send_message: Show text to user
-- apple2_send_status: Update status line
 
-Always test in the emulator first, then deploy to real hardware.
-Keep responses UPPERCASE for Apple II display compatibility.
-Be concise - the Apple II has limited screen space."""
+6502 ASSEMBLY TIPS (ca65 format):
+- Use .org $6000 for load address
+- End with RTS to return cleanly
+- Key addresses: $400=text screen, $2000=HGR page 1
+- COUT=$FDED, HOME=$FC58, GR=$FB40, HGR=$F3E2
+
+CRITICAL RULES:
+1. ALWAYS boot emulator first
+2. ALWAYS test before deploying
+3. Send status updates for EVERY step
+4. After deploy: "TYPE /SUSPEND THEN RUN" (BASIC) or "TYPE /SUSPEND THEN CALL 24576" (ML)
+5. Keep messages UPPERCASE
+
+You are the user's AI programming partner. Make it feel magical!"""
 
         self.send_status("THINKING...")
 
