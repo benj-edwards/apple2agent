@@ -208,7 +208,8 @@ class ClaudeClient:
     def stream_response(self, prompt: str,
                         chunk_callback: Callable[[str, bool], None],
                         status_callback: Optional[Callable[[str], None]] = None,
-                        model: int = MODEL_SONNET) -> None:
+                        model: int = MODEL_SONNET,
+                        custom_prompt: Optional[str] = None) -> None:
         """
         Stream a chat response (not code generation).
 
@@ -217,6 +218,7 @@ class ClaudeClient:
             chunk_callback: Called with (text_chunk, is_final)
             status_callback: Optional status updates
             model: Model selection (MODEL_SONNET, MODEL_OPUS, MODEL_HAIKU)
+            custom_prompt: Optional custom system prompt
         """
         def status(msg):
             if status_callback:
@@ -229,6 +231,10 @@ class ClaudeClient:
 
         model_id = MODEL_IDS.get(model, MODEL_IDS[MODEL_SONNET])
 
+        # Use custom prompt or default
+        system_prompt = custom_prompt if custom_prompt else \
+            "You are a helpful assistant chatting with an Apple II user. Keep responses concise (under 200 chars when possible). Use UPPERCASE since Apple II displays uppercase only. Be friendly and retro-themed."
+
         try:
             status("Thinking...")
 
@@ -236,7 +242,7 @@ class ClaudeClient:
             with self.client.messages.stream(
                 model=model_id,
                 max_tokens=500,  # Keep responses short for 40-col display
-                system="You are a helpful assistant chatting with an Apple II user. Keep responses concise (under 200 chars when possible). Use UPPERCASE since Apple II displays uppercase only. Be friendly and retro-themed.",
+                system=system_prompt,
                 messages=[{"role": "user", "content": prompt}],
             ) as stream:
                 buffer = ""
@@ -360,6 +366,7 @@ class AppleIISession:
         self.capabilities = CAP_40_COL
         self.columns = 40
         self.model = MODEL_SONNET  # Default model
+        self.custom_prompt = None  # Custom system prompt
 
     def run(self):
         """Main session loop."""
@@ -452,6 +459,8 @@ class AppleIISession:
                 "/HELP - SHOW COMMANDS\n"
                 "/CODE <DESC> - GENERATE BASIC\n"
                 "/CHAT <MSG> - CHAT WITH CLAUDE\n"
+                "/PROMPT <TEXT> - SET SYSTEM PROMPT\n"
+                "/PROMPT - CLEAR CUSTOM PROMPT\n"
                 "/IP - SHOW CONNECTION INFO"
             )
         elif command == 'CODE':
@@ -460,6 +469,15 @@ class AppleIISession:
         elif command == 'CHAT':
             msg = parts[1] if len(parts) > 1 else "hello"
             self._chat_response(msg)
+        elif command == 'PROMPT':
+            if len(parts) > 1:
+                self.custom_prompt = parts[1]
+                self._send_response(f"PROMPT SET: {parts[1][:30]}...")
+                print(f"[Session] Custom prompt: {self.custom_prompt}")
+            else:
+                self.custom_prompt = None
+                self._send_response("PROMPT CLEARED - USING DEFAULT")
+                print("[Session] Custom prompt cleared")
         elif command == 'IP':
             self._send_response(f"CONNECTED FROM {self.addr[0]}")
         else:
@@ -498,7 +516,8 @@ class AppleIISession:
         def status(msg):
             self._send_status(msg)
 
-        self.claude.stream_response(message, send_chunk, status, model=self.model)
+        self.claude.stream_response(message, send_chunk, status,
+                                    model=self.model, custom_prompt=self.custom_prompt)
 
     def _send(self, packet: bytes):
         """Send raw packet."""
