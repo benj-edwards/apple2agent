@@ -1367,23 +1367,13 @@ async def _call_tool_impl(name: str, args: dict[str, Any]) -> str:
     elif name == "tokenize":
         source = args["source"]
 
-        # Use Bobbin's --tokenize feature
-        bobbin_path = emu.bobbin_path
-        result = subprocess.run(
-            [bobbin_path, "--tokenize"],
-            input=source,
-            capture_output=True,
-            text=True
-        )
-
-        if result.returncode != 0:
-            return f"Tokenization failed: {result.stderr}"
-
-        # Output is binary, convert to hex
-        tokenized = result.stdout.encode('latin-1')
-        hex_str = ' '.join(f"{b:02X}" for b in tokenized)
-
-        return f"Tokenized ({len(tokenized)} bytes):\n{hex_str}"
+        # Use pure Python tokenizer (avoids binary encoding issues with Bobbin)
+        try:
+            tokenized = tokenize_basic(source)
+            hex_str = ' '.join(f"{b:02X}" for b in tokenized)
+            return {"hex": hex_str, "size": len(tokenized), "message": f"Tokenized {len(tokenized)} bytes"}
+        except Exception as e:
+            return f"Tokenization failed: {str(e)}"
 
     elif name == "compare_tokenization":
         basic_line = args["basic_line"]
