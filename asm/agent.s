@@ -519,6 +519,10 @@ main_ui:
 ; Draw the UI
 ;-------------------------------------------------------------------------------
 draw_ui:
+        ; Initialize output row (OUTPUT_START-1 so first scroll_output goes to row 2)
+        lda #OUTPUT_START-1
+        sta output_row
+
         ; Header
         lda #HEADER_LINE
         sta CV
@@ -681,13 +685,23 @@ handle_command:
         cmp #'I'
         beq @ip
 
-        ; /CODE
+        ; /CODE or /CLEAR (both start with C)
         cmp #'C'
         bne @check_q
         lda input_buffer+2
         cmp #'O'
-        bne @unknown
+        beq @code
+        cmp #'L'
+        beq @clear
+        jmp @unknown
+
+@code:
         jmp cmd_code
+
+@clear:
+        jsr HOME
+        jsr draw_ui
+        rts
 
 @check_q:
         ; /QUIT
@@ -715,22 +729,11 @@ handle_command:
 @check_p:
         ; /PORT
         cmp #'P'
-        bne @check_cl
+        bne @check_m
         lda input_buffer+2
         cmp #'O'
         bne @unknown
         jsr cmd_port
-        rts
-
-@check_cl:
-        ; /CLEAR
-        cmp #'C'
-        bne @check_m
-        lda input_buffer+2
-        cmp #'L'
-        bne @unknown
-        jsr HOME
-        jsr draw_ui
         rts
 
 @check_m:
@@ -2071,6 +2074,8 @@ status_msg:
         lda #STATUS_LINE
         sta CV
         jsr VTAB
+        lda #0
+        sta CH               ; Start at column 0
         jsr CLREOL
         rts
 
@@ -2088,6 +2093,8 @@ scroll_output:
         lda output_row
         sta CV
         jsr VTAB
+        lda #0
+        sta CH               ; Start at column 0
         jsr CLREOL
         rts
 
@@ -2124,7 +2131,11 @@ print_multiline:
         beq @done
         cmp #13              ; CR
         bne @print
+        tya                  ; Save Y (scroll_output destroys it via CLREOL)
+        pha
         jsr scroll_output
+        pla
+        tay                  ; Restore Y
         iny
         bne @loop
         beq @done
