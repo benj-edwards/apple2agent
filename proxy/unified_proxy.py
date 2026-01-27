@@ -48,6 +48,7 @@ from a2p_protocol import (
     MAX_DATA_SIZE
 )
 from basic_tokenizer_streaming import tokenize_program, detokenize_program
+from agentic_claude import AgenticClaude, get_agentic_claude
 
 # Try to import anthropic
 try:
@@ -357,7 +358,8 @@ class ClaudeClient:
 class AppleIISession:
     """Handles a single Apple II connection."""
 
-    def __init__(self, sock: socket.socket, addr: tuple, claude: ClaudeClient):
+    def __init__(self, sock: socket.socket, addr: tuple, claude: ClaudeClient,
+                 mcp_call: Optional[Callable] = None):
         self.sock = sock
         self.addr = addr
         self.claude = claude
@@ -367,6 +369,9 @@ class AppleIISession:
         self.columns = 40
         self.model = MODEL_SONNET  # Default model
         self.custom_prompt = None  # Custom system prompt
+        self.agentic_mode = False  # When True, use agentic loop with tools
+        self.mcp_call = mcp_call  # Function to call MCP tools (for emulator)
+        self.agentic_claude: Optional[AgenticClaude] = None
 
     def run(self):
         """Main session loop."""
@@ -443,8 +448,12 @@ class AppleIISession:
             self._handle_command(message)
             return
 
-        # Check if requesting code
-        if any(kw in message.upper() for kw in ['WRITE', 'PROGRAM', 'CODE', 'BASIC', 'MAKE']):
+        # Route based on mode
+        if self.agentic_mode:
+            # Use agentic loop with tools
+            self._agentic_response(message)
+        elif any(kw in message.upper() for kw in ['WRITE', 'PROGRAM', 'CODE', 'BASIC', 'MAKE']):
+            # Check if requesting code
             self._generate_code(message)
         else:
             self._chat_response(message)
@@ -459,10 +468,13 @@ class AppleIISession:
                 "/HELP - SHOW COMMANDS\n"
                 "/CODE <DESC> - GENERATE BASIC\n"
                 "/CHAT <MSG> - CHAT WITH CLAUDE\n"
+                "/AGENT - TOGGLE AGENTIC MODE\n"
                 "/PROMPT <TEXT> - SET SYSTEM PROMPT\n"
                 "/PROMPT - CLEAR CUSTOM PROMPT\n"
                 "/IP - SHOW CONNECTION INFO"
             )
+        elif command == 'AGENT':
+            self._toggle_agentic_mode()
         elif command == 'CODE':
             desc = parts[1] if len(parts) > 1 else "simple hello world"
             self._generate_code(desc)
@@ -542,16 +554,77 @@ class AppleIISession:
         for packet in packets:
             self._send(packet)
 
+    def _toggle_agentic_mode(self):
+        """Toggle agentic mode on/off."""
+        self.agentic_mode = not self.agentic_mode
+
+        if self.agentic_mode:
+            # Initialize agentic Claude if needed
+            if not self.agentic_claude:
+                self.agentic_claude = AgenticClaude(
+                    send_to_apple2=self._send_response,
+                    send_status=self._send_status,
+                    send_code=self._send_basic_code,
+                    mcp_call=self.mcp_call
+                )
+            self._send_response("AGENTIC MODE ON\nCLAUDE CAN NOW USE TOOLS\nAND WORK WITH EMULATOR")
+            self._send_status("AGENT READY")
+            print(f"[Session] Agentic mode enabled")
+        else:
+            self._send_response("AGENTIC MODE OFF\nBACK TO NORMAL CHAT")
+            self._send_status("CHAT MODE")
+            print(f"[Session] Agentic mode disabled")
+
+    def _agentic_response(self, message: str):
+        """Handle message in agentic mode."""
+        if not self.agentic_claude:
+            self._send_error("AGENTIC MODE NOT INITIALIZED")
+            return
+
+        # Get model ID
+        model_id = MODEL_IDS.get(self.model, MODEL_IDS[MODEL_SONNET])
+
+        try:
+            # Run the agentic loop
+            response = self.agentic_claude.run_agentic(
+                message,
+                model=model_id,
+                max_turns=20
+            )
+            # Send final response to Apple II
+            self._send_response(response)
+        except Exception as e:
+            self._send_error(f"AGENT ERROR: {str(e)[:50]}")
+
+    def _send_basic_code(self, source: str):
+        """Send BASIC code to Apple II (used by agentic mode)."""
+        try:
+            # Tokenize
+            tokenized = tokenize_program(source, BASIC_START)
+            self._send_status(f"CODE: {len(tokenized)} BYTES")
+
+            # Send code packets
+            packets = create_code_packets(self.proto, tokenized)
+            for packet in packets:
+                self._send(packet)
+                time.sleep(0.01)
+
+            self._send_status("CODE LOADED - TYPE RUN")
+        except Exception as e:
+            self._send_error(f"CODE ERROR: {str(e)[:40]}")
+
 
 class UnifiedProxy:
     """Main proxy server."""
 
-    def __init__(self, host: str = '0.0.0.0', port: int = DEFAULT_PORT):
+    def __init__(self, host: str = '0.0.0.0', port: int = DEFAULT_PORT,
+                 mcp_call: Optional[Callable] = None):
         self.host = host
         self.port = port
         self.claude = ClaudeClient()
         self.running = False
         self.sessions: Dict[tuple, AppleIISession] = {}
+        self.mcp_call = mcp_call  # Function to call MCP tools (for emulator)
 
     def start(self):
         """Start the proxy server."""
@@ -568,6 +641,7 @@ class UnifiedProxy:
         print(f"Listening on {self.host}:{self.port}")
         print(f"Protocol: A2P (Apple II Protocol)")
         print(f"Claude API: {'Ready' if self.claude.client else 'Not configured'}")
+        print(f"Agentic Mode: Available (type /AGENT to enable)")
         print()
         print("Waiting for connections...")
         print()
@@ -577,7 +651,7 @@ class UnifiedProxy:
                 try:
                     client, addr = server.accept()
                     # Handle each connection in a thread
-                    session = AppleIISession(client, addr, self.claude)
+                    session = AppleIISession(client, addr, self.claude, self.mcp_call)
                     self.sessions[addr] = session
                     thread = threading.Thread(target=session.run, daemon=True)
                     thread.start()
@@ -602,11 +676,15 @@ def run_test_mode():
     print("Test mode - Bobbin integration")
     print("This mode tests the proxy with the Bobbin emulator")
     print()
+    print("To enable agentic mode with emulator tools:")
+    print("  1. Connect Apple II")
+    print("  2. Type /AGENT to enable agentic mode")
+    print("  3. Claude will use emulator for testing before deploying")
+    print()
 
-    # Check for MCP connection
+    # In test mode, we could wire up MCP calls here
+    # For now, just run the proxy (MCP calls will show errors without connection)
     try:
-        # In test mode, we'd use MCP tools to control Bobbin
-        # For now, just run the proxy
         proxy = UnifiedProxy()
         proxy.start()
     except KeyboardInterrupt:
