@@ -372,6 +372,8 @@ class AppleIISession:
         self.agentic_mode = False  # When True, use agentic loop with tools
         self.mcp_call = mcp_call  # Function to call MCP tools (for emulator)
         self.agentic_claude: Optional[AgenticClaude] = None
+        self.max_turns = 20  # Max agentic turns
+        self.keep_history = True  # Keep conversation history between messages
 
     def run(self):
         """Main session loop."""
@@ -469,12 +471,39 @@ class AppleIISession:
                 "/CODE <DESC> - GENERATE BASIC\n"
                 "/CHAT <MSG> - CHAT WITH CLAUDE\n"
                 "/AGENT - TOGGLE AGENTIC MODE\n"
+                "/TURNS <N> - SET MAX AGENT TURNS\n"
+                "/HISTORY - TOGGLE CONVERSATION MEMORY\n"
+                "/CLEAR - CLEAR CONVERSATION\n"
                 "/PROMPT <TEXT> - SET SYSTEM PROMPT\n"
-                "/PROMPT - CLEAR CUSTOM PROMPT\n"
                 "/IP - SHOW CONNECTION INFO"
             )
         elif command == 'AGENT':
             self._toggle_agentic_mode()
+        elif command == 'TURNS':
+            if len(parts) > 1:
+                try:
+                    n = int(parts[1])
+                    if 1 <= n <= 100:
+                        self.max_turns = n
+                        self._send_response(f"MAX TURNS SET TO {n}")
+                    else:
+                        self._send_response("TURNS MUST BE 1-100")
+                except ValueError:
+                    self._send_response("USAGE: /TURNS <NUMBER>")
+            else:
+                self._send_response(f"MAX TURNS: {self.max_turns}")
+        elif command == 'HISTORY':
+            self.keep_history = not self.keep_history
+            if self.keep_history:
+                self._send_response("HISTORY ON - REMEMBERING CONVERSATION")
+            else:
+                self._send_response("HISTORY OFF - EACH MESSAGE IS FRESH")
+                if self.agentic_claude:
+                    self.agentic_claude.clear_conversation()
+        elif command == 'CLEAR':
+            if self.agentic_claude:
+                self.agentic_claude.clear_conversation()
+            self._send_response("CONVERSATION CLEARED")
         elif command == 'CODE':
             desc = parts[1] if len(parts) > 1 else "simple hello world"
             self._generate_code(desc)
@@ -581,6 +610,10 @@ class AppleIISession:
             self._send_error("AGENTIC MODE NOT INITIALIZED")
             return
 
+        # Clear history if not keeping it
+        if not self.keep_history:
+            self.agentic_claude.clear_conversation()
+
         # Get model ID
         model_id = MODEL_IDS.get(self.model, MODEL_IDS[MODEL_SONNET])
 
@@ -589,7 +622,7 @@ class AppleIISession:
             response = self.agentic_claude.run_agentic(
                 message,
                 model=model_id,
-                max_turns=20
+                max_turns=self.max_turns
             )
             # Send final response to Apple II
             self._send_response(response)
