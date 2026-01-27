@@ -173,10 +173,11 @@ class Emulator:
                 time.sleep(0.1 * attempt)  # Increasing backoff
 
             if self.in_debugger:
-                # Verify we're actually in debugger by checking for prompt
+                # Verify we're actually in debugger by sending 'help' command
+                # IMPORTANT: Do NOT send empty line - it triggers single-step mode!
                 try:
-                    self.process.sendline("")  # Send empty command
-                    self.process.expect([r'BOBBIN> ', r'> \r', r'> \n', r'>\s*$'], timeout=0.5)
+                    self.process.sendline("help")
+                    self.process.expect(r'BOBBIN> ', timeout=0.5)
                     return True
                 except pexpect.TIMEOUT:
                     # Not actually in debugger, clear flag and try again
@@ -192,10 +193,10 @@ class Emulator:
                     break
             time.sleep(0.05)
 
-            # Send Ctrl-C twice QUICKLY with no delay between them.
-            # This is critical: Bobbin triggers the debugger when sigint_received > 1.
-            self.process.sendcontrol('c')
-            self.process.sendcontrol('c')
+            # Send SIGQUIT (Ctrl-\) to enter debugger
+            # Using SIGQUIT instead of SIGINT avoids leaking Ctrl-C to Apple II
+            import signal
+            self.process.kill(signal.SIGQUIT)
 
             # Small delay to let the signals be processed
             time.sleep(0.1)
@@ -233,36 +234,29 @@ class Emulator:
         Returns:
             True if exited debugger
         """
+        # Only try to exit if we think we're in debugger
         if not self.in_debugger:
             return True
 
+        # IMPORTANT: Do NOT send empty lines - they trigger single-step mode!
+        # Just send 'c' to continue execution
         self.process.sendline("c")
 
-        # Wait for "Continuing..." message - this is critical to sync
+        # Wait for "Continuing..." message
         try:
-            self.process.expect(r'Continuing\.\.\.', timeout=0.5)
+            self.process.expect(r'Continuing\.\.\.', timeout=1.0)
         except pexpect.TIMEOUT:
             pass
 
-        # Give emulator time to fully resume execution
-        # The keystroke leak bug happens because debugger output can leak
-        # into stdin if we don't properly drain the buffer
-        time.sleep(0.1)
+        # Wait a moment for emulator to resume
+        time.sleep(0.3)
 
-        # Aggressively drain ALL remaining buffered data
-        # Multiple attempts ensure buffer is completely empty
+        # Drain any remaining output
         for _ in range(5):
             try:
-                data = self.process.read_nonblocking(4096, timeout=0.02)
-                if not data:
-                    break
+                self.process.read_nonblocking(4096, timeout=0.05)
             except (pexpect.TIMEOUT, pexpect.EOF):
                 break
-            time.sleep(0.01)
-
-        # Final sync delay to ensure emulator is ready for input
-        # This longer delay helps prevent the keystroke leak bug
-        time.sleep(0.15)
 
         self.in_debugger = False
         return True
@@ -275,7 +269,7 @@ class Emulator:
             cmd: Command to execute
             timeout: Timeout for command response
             stay_in_debugger: If True, stay in debugger after command.
-                              If False, exit debugger if we entered it.
+                              If False, always exit debugger after command.
 
         Returns:
             Command output
@@ -298,11 +292,31 @@ class Emulator:
             # Check if we got partial output
             output = self.process.before if self.process.before else ""
 
-        # Exit debugger if we entered it and caller doesn't want to stay
-        if not stay_in_debugger and not was_in_debugger:
+        # Exit debugger if caller doesn't want to stay
+        # Always try to exit to ensure clean state
+        if not stay_in_debugger:
             self.exit_debugger()
 
         return output.strip()
+
+    def debugger_help(self) -> str:
+        """Get debugger help - for debugging purposes."""
+        if not self.is_running:
+            raise BobbinError("Emulator not running")
+
+        if not self.in_debugger:
+            if not self.enter_debugger():
+                raise BobbinError("Failed to enter debugger")
+
+        self.process.sendline("help")
+
+        try:
+            self.process.expect(r'BOBBIN> ', timeout=5.0)
+            output = self.process.before
+        except pexpect.TIMEOUT:
+            output = self.process.before if self.process.before else ""
+
+        return output
 
     def peek(self, address: int, count: int = 1) -> list[int]:
         """Read bytes from memory.
@@ -314,13 +328,16 @@ class Emulator:
         Returns:
             List of byte values
         """
+        # Use longer timeout for large reads (1 second per 256 bytes, minimum 3 seconds)
+        read_timeout = max(3.0, count / 256)
+
         if count == 1:
             # Single byte
-            output = self.debugger_command(f"{address:04X}", stay_in_debugger=False)
+            output = self.debugger_command(f"{address:04X}", timeout=read_timeout, stay_in_debugger=False)
         else:
             # Range
             end_addr = min(address + count - 1, 0xFFFF)
-            output = self.debugger_command(f"{address:04X}.{end_addr:04X}", stay_in_debugger=False)
+            output = self.debugger_command(f"{address:04X}.{end_addr:04X}", timeout=read_timeout, stay_in_debugger=False)
 
         # Parse hex output
         # Format: "0400: A0 A0 A0 A0 A0 A0 A0 A0"
@@ -370,35 +387,25 @@ class Emulator:
         """
         memory = {}
 
-        # Enter debugger once for the entire operation
-        was_in_debugger = self.in_debugger
-        if not was_in_debugger:
-            if not self.enter_debugger():
-                raise BobbinError("Failed to enter debugger for screen read")
+        # Read text page 1 ($0400-$07FF) using debugger_command
+        # stay_in_debugger=False ensures we exit cleanly
+        end_addr = 0x0400 + 0x0400 - 1  # 0x07FF
+        output = self.debugger_command(f"0400.{end_addr:04X}", stay_in_debugger=False)
 
-        try:
-            # Read text page 1 ($0400-$07FF) using direct debugger command
-            end_addr = 0x0400 + 0x0400 - 1  # 0x07FF
-            output = self.debugger_command(f"0400.{end_addr:04X}", stay_in_debugger=True)
+        # Parse hex output
+        bytes_list = []
+        for line in output.split('\n'):
+            if ':' in line:
+                hex_part = line.split(':', 1)[1]
+            else:
+                hex_part = line
+            for token in hex_part.split():
+                token = token.strip()
+                if len(token) == 2 and all(c in '0123456789ABCDEFabcdef' for c in token):
+                    bytes_list.append(int(token, 16))
 
-            # Parse hex output
-            bytes_list = []
-            for line in output.split('\n'):
-                if ':' in line:
-                    hex_part = line.split(':', 1)[1]
-                else:
-                    hex_part = line
-                for token in hex_part.split():
-                    token = token.strip()
-                    if len(token) == 2 and all(c in '0123456789ABCDEFabcdef' for c in token):
-                        bytes_list.append(int(token, 16))
-
-            for i, byte in enumerate(bytes_list[:0x0400]):
-                memory[0x0400 + i] = byte
-        finally:
-            # Exit debugger if we entered it
-            if not was_in_debugger:
-                self.exit_debugger()
+        for i, byte in enumerate(bytes_list[:0x0400]):
+            memory[0x0400 + i] = byte
 
         return memory
 
@@ -432,64 +439,41 @@ class Emulator:
         text = text.upper()
 
         # Escape special characters for the keys command
+        # Backslashes and quotes need escaping for Bobbin's command parser
         escaped = text.replace('\\', '\\\\')
+        escaped = escaped.replace('"', '\\"')
         if include_return:
             escaped += '\\r'
 
-        # ALWAYS force fresh debugger entry for key injection
-        # The in_debugger flag can get stale, causing "keys ..." to be sent
-        # directly to the Apple II instead of the debugger
-        self.in_debugger = False
+        # Enter debugger for key injection
         if not self.enter_debugger():
             raise BobbinError("Failed to enter debugger for key injection")
 
-        # Clear the Apple II keyboard buffer/strobe before injecting keys
-        # This prevents Ctrl-C characters from the debugger entry from leaking
-        # into the Apple II input. Write to $C010 clears keyboard strobe.
-        self.process.sendline("poke c010 0")
-        try:
-            self.process.expect(r'BOBBIN> ', timeout=1.0)
-        except pexpect.TIMEOUT:
-            pass  # Continue anyway
-
-        # Also clear Bobbin's internal key injection queue with empty keys command
-        self.process.sendline("keys")
-        try:
-            self.process.expect(r'Injected 0 characters\.', timeout=1.0)
-        except pexpect.TIMEOUT:
-            pass
-
-        # Re-enter debugger since 'keys' auto-exits
-        self.in_debugger = False
-        if not self.enter_debugger():
-            raise BobbinError("Failed to re-enter debugger for key injection")
-
-        # Send the keys command directly (don't use debugger_command which
-        # expects a new prompt, but keys auto-exits the debugger)
+        # Send the keys command - this auto-exits the debugger
         self.process.sendline(f"keys {escaped}")
 
-        # Wait for the "Injected N characters" confirmation message
-        # This confirms the keys were queued and the debugger is exiting
+        # Wait for the "Injected N characters" confirmation
         try:
             self.process.expect(r'Injected \d+ characters\.', timeout=2.0)
         except pexpect.TIMEOUT:
-            pass  # Continue anyway
+            pass
 
-        # The keys command auto-exits the debugger and resumes emulation
-        # DO NOT call exit_debugger() - it would send 'c' to the Apple II!
+        # keys command auto-exits debugger
         self.in_debugger = False
 
-        # Give emulator time to process keys and produce output
-        # Then aggressively drain the buffer to prepare for next debugger entry
-        time.sleep(0.3)
-        for _ in range(10):
+        # Wait for BASIC prompt to confirm ready for next command
+        try:
+            self.process.expect(r'\]', timeout=1.0)
+        except pexpect.TIMEOUT:
+            pass
+
+        # Drain remaining output
+        time.sleep(0.2)
+        for _ in range(5):
             try:
-                data = self.process.read_nonblocking(4096, timeout=0.05)
-                if not data:
-                    break
+                self.process.read_nonblocking(4096, timeout=0.03)
             except (pexpect.TIMEOUT, pexpect.EOF):
                 break
-            time.sleep(0.02)
 
     def type_text(self, text: str, delay: float = 0.02,
                   include_return: bool = False, use_inject: bool = True) -> None:
@@ -509,9 +493,20 @@ class Emulator:
             self.inject_keys(text, include_return)
             return
 
-        # Legacy stdin-based input (may have timing issues)
+        # stdin-based input
         if self.in_debugger:
             self.exit_debugger()
+
+        # Drain any pending output before typing
+        # This ensures clean state after debugger operations
+        for _ in range(5):
+            try:
+                self.process.read_nonblocking(4096, timeout=0.02)
+            except (pexpect.TIMEOUT, pexpect.EOF):
+                break
+
+        # Small delay to ensure emulator is ready
+        time.sleep(0.1)
 
         # Apple II is uppercase
         text = text.upper()
@@ -523,6 +518,9 @@ class Emulator:
 
         if include_return:
             self.process.send('\r')
+
+        # Give emulator time to process the input
+        time.sleep(0.2)
 
     def send_return(self) -> None:
         """Send RETURN key."""
@@ -640,7 +638,7 @@ class Emulator:
     def run_basic_command(self, command: str, timeout: float = 30.0) -> str:
         """Type a BASIC command and wait for the prompt to return.
 
-        Uses inject_keys for reliable input, then waits and reads the screen.
+        Uses stdin-based typing for reliable input, then waits and reads the screen.
 
         Args:
             command: BASIC command to execute
@@ -649,27 +647,16 @@ class Emulator:
         Returns:
             Output from the command (screen contents)
         """
-        # Use inject_keys for reliable command entry
+        # Use stdin-based typing - more reliable than debugger injection
+        # because debugger entry via Ctrl-C can leak characters to Apple II
         command = command.upper()
-        self.inject_keys(command, include_return=True)
+        self.type_text(command, include_return=True, use_inject=False)
 
-        # Wait for command to complete - most BASIC commands are instant
-        # Give the emulator time to process and settle
-        time.sleep(2.0)
+        # Wait for command to complete and fully process
+        time.sleep(0.5)
 
-        # Read screen directly using peek (bypasses debugger state issues)
-        # Read text page 1 ($0400-$07FF)
-        memory = {}
-        try:
-            data = self.peek(0x0400, 0x0400)
-            for i, byte in enumerate(data):
-                memory[0x0400 + i] = byte
-        except Exception as e:
-            raise BobbinError(f"Failed to read screen memory: {e}")
-
-        # Convert memory to screen lines
-        from .screen import decode_screen
-        lines = decode_screen(memory)
+        # Read screen using the standard method
+        lines = self.read_screen()
         return '\n'.join(line.rstrip() for line in lines).strip()
 
     def capture_hgr(self, filepath: str, page: int = 1,

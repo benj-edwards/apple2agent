@@ -94,6 +94,44 @@ start_address       (2 bytes, little-endian)
 2. **Debugger Mode**: MCP tools intermittently fail to enter debugger
 3. **Direct Commands**: Immediate-mode BASIC commands sometimes give SYNTAX ERROR in emulator
 
+## Critical Bug Fix: Debugger Single-Step Mode (2025-01-26)
+
+### Problem Identified
+We were sending **empty lines** to verify we're at the Bobbin debugger prompt. However, in Bobbin's debug.c (line 310-313):
+```c
+if (HAVE("") || HAVE(" ") || HAVE("s")) {
+    loop = false;  // but debugging_flag stays TRUE!
+}
+```
+An empty line triggers **single-step mode** - the debugger executes one instruction and re-enters, causing:
+- Debugger output (`3735- A=17 X=00...`) after every instruction
+- Asterisk (`*`) step prompt instead of BASIC prompt (`]`)
+- All commands interpreted as debugger commands
+- SYNTAX ERROR on any BASIC command
+
+### Fix Applied (emulator.py)
+1. **enter_debugger()**: Changed prompt verification from empty line to `help` command
+2. **exit_debugger()**: Simplified to just send `c` (continue) without any verification
+
+```python
+# In enter_debugger - use 'help' to verify, NOT empty line:
+self.process.sendline("help")  # NOT sendline("")
+
+# In exit_debugger - just continue:
+self.process.sendline("c")
+```
+
+### Testing Required After Fix
+1. **Basic Commands After Peek**: `boot -> PRINT 1 -> peek -> PRINT 2` should work
+2. **Program Injection**: `boot -> inject_tokenized_basic -> LIST -> RUN` should work
+3. **Graphics Capture**: `boot -> GR program -> capture_gr -> TEXT` should work
+4. **Multiple Debugger Ops**: `boot -> peek -> poke -> peek -> PRINT` should work
+
+### Current Workaround (If Fix Not Active)
+1. Use `type_text` to enter BASIC programs (stdin-based, no debugger)
+2. Use `capture_gr`/`capture_hgr` for graphics (uses debugger, corrupts state)
+3. Shutdown and reboot emulator after each capture
+
 ## Files
 
 ```

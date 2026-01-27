@@ -1227,7 +1227,8 @@ async def _call_tool_impl(name: str, args: dict[str, Any]) -> str:
     elif name == "type_text":
         text = args["text"]
         press_return = args.get("press_return", True)
-        emu.type_text(text, include_return=press_return, use_inject=True)
+        # Use stdin-based typing - more reliable than debugger key injection
+        emu.type_text(text, include_return=press_return, use_inject=False)
         return f"Typed: {text}" + (" + RETURN" if press_return else "")
 
     elif name == "send_key":
@@ -1343,7 +1344,7 @@ async def _call_tool_impl(name: str, args: dict[str, Any]) -> str:
         emu.run_basic_command("NEW")
 
         # Type the line
-        emu.type_text(basic_line, include_return=True, use_inject=True)
+        emu.type_text(basic_line, include_return=True, use_inject=False)
         emu.wait_for_prompt("]")
 
         # Read memory at $0801 to see tokenized form
@@ -1366,14 +1367,10 @@ async def _call_tool_impl(name: str, args: dict[str, Any]) -> str:
 
     elif name == "tokenize":
         source = args["source"]
-
-        # Use pure Python tokenizer (avoids binary encoding issues with Bobbin)
-        try:
-            tokenized = tokenize_basic(source)
-            hex_str = ' '.join(f"{b:02X}" for b in tokenized)
-            return {"hex": hex_str, "size": len(tokenized), "message": f"Tokenized {len(tokenized)} bytes"}
-        except Exception as e:
-            return f"Tokenization failed: {str(e)}"
+        # Use pure Python tokenizer
+        tokenized = tokenize_basic(source)
+        hex_str = ' '.join(f"{b:02X}" for b in tokenized)
+        return f"Tokenized {len(tokenized)} bytes\nHex: {hex_str}"
 
     elif name == "compare_tokenization":
         basic_line = args["basic_line"]
@@ -1381,7 +1378,7 @@ async def _call_tool_impl(name: str, args: dict[str, Any]) -> str:
 
         # Get Apple II's tokenization
         emu.run_basic_command("NEW")
-        emu.type_text(basic_line, include_return=True, use_inject=True)
+        emu.type_text(basic_line, include_return=True, use_inject=False)
         emu.wait_for_prompt("]")
 
         data = emu.peek(0x0801, 128)
@@ -1420,33 +1417,40 @@ async def _call_tool_impl(name: str, args: dict[str, Any]) -> str:
         # Parse hex string
         data = bytes.fromhex(hex_data.replace(' ', ''))
 
-        # Write the tokenized BASIC to memory
-        emu.poke(load_addr, list(data))
-
         # Calculate end address
         end_addr = load_addr + len(data)
 
-        # Update BASIC pointers
+        # Enter debugger once for all memory writes
+        emu.enter_debugger()
+
+        # Write the tokenized BASIC to memory using direct debugger commands
+        # This avoids the overhead of multiple enter/exit cycles
+        hex_values = ' '.join(f"{b:02X}" for b in data)
+        emu.debugger_command(f"{load_addr:04X}: {hex_values}", stay_in_debugger=True)
+
+        # Update BASIC pointers - all in one debugger session
         # TXTTAB ($67-68) = start of program
-        emu.poke(0x67, [load_addr & 0xFF, (load_addr >> 8) & 0xFF])
+        emu.debugger_command(f"0067: {load_addr & 0xFF:02X} {(load_addr >> 8) & 0xFF:02X}", stay_in_debugger=True)
 
-        # VARTAB ($69-6A) = end of program
-        emu.poke(0x69, [end_addr & 0xFF, (end_addr >> 8) & 0xFF])
-
-        # ARYTAB ($6B-6C) = same as VARTAB initially
-        emu.poke(0x6B, [end_addr & 0xFF, (end_addr >> 8) & 0xFF])
-
-        # STREND ($6D-6E) = same as VARTAB initially
-        emu.poke(0x6D, [end_addr & 0xFF, (end_addr >> 8) & 0xFF])
+        # VARTAB, ARYTAB, STREND ($69-6E) = end of program
+        emu.debugger_command(f"0069: {end_addr & 0xFF:02X} {(end_addr >> 8) & 0xFF:02X}", stay_in_debugger=True)
+        emu.debugger_command(f"006B: {end_addr & 0xFF:02X} {(end_addr >> 8) & 0xFF:02X}", stay_in_debugger=True)
+        emu.debugger_command(f"006D: {end_addr & 0xFF:02X} {(end_addr >> 8) & 0xFF:02X}", stay_in_debugger=True)
 
         # PRGEND ($AF-B0) = end of program
-        emu.poke(0xAF, [end_addr & 0xFF, (end_addr >> 8) & 0xFF])
+        emu.debugger_command(f"00AF: {end_addr & 0xFF:02X} {(end_addr >> 8) & 0xFF:02X}", stay_in_debugger=True)
+
+        # Exit debugger once at the end
+        emu.exit_debugger()
+
+        # Do a dummy read_screen cycle to ensure emulator state is clean
+        # This seems to be necessary to fix stdin handling after debugger operations
+        emu.read_screen()
 
         result = f"Injected {len(data)} bytes at ${load_addr:04X}\n"
         result += f"Updated pointers: TXTTAB=${load_addr:04X}, VARTAB=${end_addr:04X}"
 
         if auto_run:
-            emu.exit_debugger()
             output = emu.run_basic_command("RUN")
             result += f"\n\nRUN output:\n{output}"
 
