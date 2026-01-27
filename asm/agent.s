@@ -2034,7 +2034,7 @@ show_menu:
 
 @wait:
         jsr RDKEY
-        and #$DF
+        and #$7F             ; Clear high bit (RDKEY sets it)
 
         cmp #'1'
         beq @continue
@@ -2044,7 +2044,7 @@ show_menu:
         beq @ip
         cmp #'4'
         beq @exit
-        cmp #$9B             ; ESC
+        cmp #$1B             ; ESC (without high bit)
         beq @continue
         jmp @wait
 
