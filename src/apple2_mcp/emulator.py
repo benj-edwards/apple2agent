@@ -29,8 +29,9 @@ class BobbinError(Exception):
 class Emulator:
     """Manages a Bobbin emulator process."""
 
-    # Debugger prompt pattern
-    DEBUGGER_PROMPT = ">"
+    # Debugger prompt pattern - Bobbin uses "BOBBIN> " or may just use ">"
+    # We match either for flexibility
+    DEBUGGER_PROMPT_PATTERN = r'(?:BOBBIN> |^> |\n> )'
 
     # Default Bobbin path (can be overridden)
     DEFAULT_BOBBIN_PATH = None
@@ -147,8 +148,15 @@ class Emulator:
                 self.process = None
                 self.in_debugger = False
 
-    def enter_debugger(self, timeout: float = 2.0) -> bool:
+    def enter_debugger(self, timeout: float = 2.0, max_retries: int = 3) -> bool:
         """Enter the Bobbin debugger (Ctrl-C twice).
+
+        Uses retry logic to handle intermittent failures caused by timing
+        issues or stale state.
+
+        Args:
+            timeout: Timeout for each attempt
+            max_retries: Maximum number of attempts before giving up
 
         Returns:
             True if now in debugger
@@ -156,31 +164,68 @@ class Emulator:
         if not self.is_running:
             raise BobbinError("Emulator not running")
 
-        if self.in_debugger:
-            return True
+        # Try multiple times with increasing delays
+        for attempt in range(max_retries):
+            # Clear stale state - the debugger may have exited naturally
+            # (e.g., 'keys' command auto-exits) but the flag wasn't updated
+            if attempt > 0:
+                self.in_debugger = False
+                time.sleep(0.1 * attempt)  # Increasing backoff
 
-        # Send Ctrl-C twice QUICKLY with no delay between them.
-        # This is critical: Bobbin triggers the debugger when sigint_received > 1.
-        # If there's a delay, the first Ctrl-C might be delivered to the Apple II
-        # before the second one arrives, leaving garbage in the keyboard buffer.
-        self.process.sendcontrol('c')
-        self.process.sendcontrol('c')
+            if self.in_debugger:
+                # Verify we're actually in debugger by checking for prompt
+                try:
+                    self.process.sendline("")  # Send empty command
+                    self.process.expect([r'BOBBIN> ', r'> \r', r'> \n', r'>\s*$'], timeout=0.5)
+                    return True
+                except pexpect.TIMEOUT:
+                    # Not actually in debugger, clear flag and try again
+                    self.in_debugger = False
 
-        # Wait for debugger prompt (we modified Bobbin to use "BOBBIN> ")
-        try:
-            self.process.expect(r'BOBBIN> ', timeout=timeout)
-            self.in_debugger = True
-
-            # Drain any buffered output to ensure clean state
+            # Drain any buffered output before sending Ctrl-C
+            for _ in range(5):
+                try:
+                    data = self.process.read_nonblocking(4096, timeout=0.02)
+                    if not data:
+                        break
+                except (pexpect.TIMEOUT, pexpect.EOF):
+                    break
             time.sleep(0.05)
-            try:
-                self.process.read_nonblocking(4096, timeout=0.02)
-            except (pexpect.TIMEOUT, pexpect.EOF):
-                pass
 
-            return True
-        except pexpect.TIMEOUT:
-            return False
+            # Send Ctrl-C twice QUICKLY with no delay between them.
+            # This is critical: Bobbin triggers the debugger when sigint_received > 1.
+            self.process.sendcontrol('c')
+            self.process.sendcontrol('c')
+
+            # Small delay to let the signals be processed
+            time.sleep(0.1)
+
+            # Wait for debugger prompt - try multiple patterns
+            # Bobbin uses "BOBBIN> " as its prompt
+            try:
+                # Use a simpler, more reliable pattern
+                self.process.expect(r'BOBBIN> ', timeout=timeout)
+                self.in_debugger = True
+
+                # Drain any buffered output to ensure clean state
+                time.sleep(0.05)
+                for _ in range(3):
+                    try:
+                        self.process.read_nonblocking(4096, timeout=0.02)
+                    except (pexpect.TIMEOUT, pexpect.EOF):
+                        break
+
+                return True
+            except pexpect.TIMEOUT:
+                # Check if we got partial output that indicates debugger
+                if self.process.before and 'BOBBIN' in self.process.before:
+                    self.in_debugger = True
+                    return True
+                # Try again on next iteration
+                continue
+
+        # All retries exhausted
+        return False
 
     def exit_debugger(self, timeout: float = 2.0) -> bool:
         """Exit debugger and continue emulation.
@@ -245,11 +290,12 @@ class Emulator:
 
         self.process.sendline(cmd)
 
-        # Wait for next prompt (we modified Bobbin to use "BOBBIN> ")
+        # Wait for next prompt
         try:
             self.process.expect(r'BOBBIN> ', timeout=timeout)
             output = self.process.before
         except pexpect.TIMEOUT:
+            # Check if we got partial output
             output = self.process.before if self.process.before else ""
 
         # Exit debugger if we entered it and caller doesn't want to stay
@@ -412,12 +458,17 @@ class Emulator:
         # DO NOT call exit_debugger() - it would send 'c' to the Apple II!
         self.in_debugger = False
 
-        # Give emulator time to process and drain any remaining output
-        time.sleep(0.05)
-        try:
-            self.process.read_nonblocking(4096, timeout=0.02)
-        except (pexpect.TIMEOUT, pexpect.EOF):
-            pass
+        # Give emulator time to process keys and produce output
+        # Then aggressively drain the buffer to prepare for next debugger entry
+        time.sleep(0.3)
+        for _ in range(10):
+            try:
+                data = self.process.read_nonblocking(4096, timeout=0.05)
+                if not data:
+                    break
+            except (pexpect.TIMEOUT, pexpect.EOF):
+                break
+            time.sleep(0.02)
 
     def type_text(self, text: str, delay: float = 0.02,
                   include_return: bool = False, use_inject: bool = True) -> None:
@@ -568,29 +619,37 @@ class Emulator:
     def run_basic_command(self, command: str, timeout: float = 30.0) -> str:
         """Type a BASIC command and wait for the prompt to return.
 
-        Uses inject_keys for reliable input, avoiding timing issues with sendline.
+        Uses inject_keys for reliable input, then waits and reads the screen.
 
         Args:
             command: BASIC command to execute
-            timeout: Maximum wait time
+            timeout: Maximum wait time for command to complete
 
         Returns:
-            Output from the command
+            Output from the command (screen contents)
         """
         # Use inject_keys for reliable command entry
         command = command.upper()
         self.inject_keys(command, include_return=True)
 
-        # Give the Apple II time to process the command
-        time.sleep(0.1)
+        # Wait for command to complete - most BASIC commands are instant
+        # Give the emulator time to process and settle
+        time.sleep(2.0)
 
-        # Now wait for the prompt at start of line
-        # Try both \n] and \r] since different systems use different line endings
+        # Read screen directly using peek (bypasses debugger state issues)
+        # Read text page 1 ($0400-$07FF)
+        memory = {}
         try:
-            self.process.expect([r'\n\]', r'\r\]'], timeout=timeout)
-            return self.process.before
-        except pexpect.TIMEOUT:
-            raise BobbinError("Timeout waiting for BASIC prompt")
+            data = self.peek(0x0400, 0x0400)
+            for i, byte in enumerate(data):
+                memory[0x0400 + i] = byte
+        except Exception as e:
+            raise BobbinError(f"Failed to read screen memory: {e}")
+
+        # Convert memory to screen lines
+        from .screen import decode_screen
+        lines = decode_screen(memory)
+        return '\n'.join(line.rstrip() for line in lines).strip()
 
     def capture_hgr(self, filepath: str, page: int = 1,
                     format: str = "ppm", color: bool = False) -> bool:
