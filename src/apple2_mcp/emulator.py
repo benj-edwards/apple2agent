@@ -443,6 +443,27 @@ class Emulator:
         if not self.enter_debugger():
             raise BobbinError("Failed to enter debugger for key injection")
 
+        # Clear the Apple II keyboard buffer/strobe before injecting keys
+        # This prevents Ctrl-C characters from the debugger entry from leaking
+        # into the Apple II input. Write to $C010 clears keyboard strobe.
+        self.process.sendline("poke c010 0")
+        try:
+            self.process.expect(r'BOBBIN> ', timeout=1.0)
+        except pexpect.TIMEOUT:
+            pass  # Continue anyway
+
+        # Also clear Bobbin's internal key injection queue with empty keys command
+        self.process.sendline("keys")
+        try:
+            self.process.expect(r'Injected 0 characters\.', timeout=1.0)
+        except pexpect.TIMEOUT:
+            pass
+
+        # Re-enter debugger since 'keys' auto-exits
+        self.in_debugger = False
+        if not self.enter_debugger():
+            raise BobbinError("Failed to re-enter debugger for key injection")
+
         # Send the keys command directly (don't use debugger_command which
         # expects a new prompt, but keys auto-exits the debugger)
         self.process.sendline(f"keys {escaped}")
