@@ -108,8 +108,58 @@ def list_files(disk_data):
     return files
 
 
+def mark_block_free(disk_data, block_num):
+    """Mark a block as free in the bitmap."""
+    block2 = read_block(disk_data, 2)
+    bitmap_block = struct.unpack('<H', block2[0x27:0x29])[0]
+
+    bitmap = read_block(disk_data, bitmap_block)
+    byte_idx = block_num // 8
+    bit_idx = 7 - (block_num % 8)
+    bitmap[byte_idx] |= (1 << bit_idx)  # Set bit = free
+
+    write_block(disk_data, bitmap_block, bitmap)
+
+
+def free_file_blocks(disk_data, storage_type, key_block):
+    """Free all blocks used by a file."""
+    if storage_type == 0x1:  # Seedling - single data block
+        mark_block_free(disk_data, key_block)
+        return 1
+
+    elif storage_type == 0x2:  # Sapling - index + data blocks
+        index = read_block(disk_data, key_block)
+        freed = 0
+        for i in range(256):
+            data_block = index[i]
+            if data_block != 0:
+                mark_block_free(disk_data, data_block)
+                freed += 1
+        mark_block_free(disk_data, key_block)  # Free index block
+        return freed + 1
+
+    elif storage_type == 0x3:  # Tree - master index + subindex + data
+        master = read_block(disk_data, key_block)
+        freed = 0
+        for i in range(256):
+            sub_block = master[i]
+            if sub_block != 0:
+                subindex = read_block(disk_data, sub_block)
+                for j in range(256):
+                    data_block = subindex[j]
+                    if data_block != 0:
+                        mark_block_free(disk_data, data_block)
+                        freed += 1
+                mark_block_free(disk_data, sub_block)
+                freed += 1
+        mark_block_free(disk_data, key_block)
+        return freed + 1
+
+    return 0
+
+
 def delete_file(disk_data, filename):
-    """Delete a file from the disk by clearing its directory entry."""
+    """Delete a file from the disk by clearing its directory entry and freeing blocks."""
     filename = filename.upper()
 
     # Find the file
@@ -129,6 +179,13 @@ def delete_file(disk_data, filename):
 
                 if name.upper() == filename:
                     print(f"Found {name} at block {dir_block}, offset {offset}")
+
+                    # Get key block for freeing
+                    key_block = struct.unpack('<H', block[offset+0x11:offset+0x13])[0]
+
+                    # Free the file's blocks
+                    blocks_freed = free_file_blocks(disk_data, storage_type, key_block)
+                    print(f"  Freed {blocks_freed} blocks")
 
                     # Clear the storage type (marks entry as deleted)
                     block[offset] = 0x00

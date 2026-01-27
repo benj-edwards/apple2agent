@@ -6,6 +6,8 @@ All notable changes to the Apple II Agent project.
 
 ### Fixed
 
+- **prodos_delete.py not freeing disk space**: The ProDOS delete tool was marking directory entries as deleted but not freeing blocks in the volume bitmap, causing "disk full" errors even after deleting files. Fixed by adding `mark_block_free()` and `free_file_blocks()` functions to properly reclaim storage.
+
 - **Blank screen on /HELP and /MODEL commands**: The `print_multiline` function was corrupted by `CLREOL` destroying the Y register. Fixed by saving/restoring Y around the `scroll_output` call.
 
 - **Output appearing on wrong screen row**: The `output_row` variable was uninitialized in BSS, causing text to appear on row 0 instead of the output area. Fixed by initializing `output_row` to `OUTPUT_START-1` in `draw_ui`.
@@ -28,7 +30,7 @@ All slash commands tested and verified functional:
 ### Known Limitations
 
 - **MCP testing during network operations**: The MCP debugger interface has timing issues when the agent is performing network operations. The screen may appear blank via MCP tools even when the agent is functioning correctly. Test network features interactively or via direct stdin/stdout.
-- **Disk writes**: `/SAVE` fails in Bobbin because it doesn't fully support ProDOS MLI file write operations. The agent's ProDOS code is correct and works on real hardware or emulators with full MLI support.
+- **Disk config persistence disabled**: `/SAVE` command currently reports success but does not persist to disk. ProDOS MLI pathname operations (OPEN, CREATE) return error $40 (Invalid pathname) when called after IP65 network initialization, even though GET_PREFIX works correctly. Config changes are kept in memory for the session. This appears to be a Bobbin/IP65 interaction issue requiring further investigation.
 
 ### Network Testing
 
