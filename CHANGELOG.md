@@ -14,6 +14,19 @@ All notable changes to the Apple II Agent project.
 
 - **/CLEAR command not recognized**: The command parser checked for 'C' commands but only handled `/CODE` (checking for 'O' at position 2). `/CLEAR` (with 'L' at position 2) fell through to "UNKNOWN COMMAND". Fixed by adding a check for 'L' to handle `/CLEAR`.
 
+### Verified Working
+
+All slash commands tested and verified functional:
+- `/IP`, `/HELP`, `/MODEL`, `/CLEAR`, `/SETIP`, `/PORT` - all working correctly
+- Network connection failure handled gracefully (displays "CONNECTION FAILED", agent continues)
+- Agent remains stable after any operation
+
+### Known Limitations
+
+- ESC menu displays but key input may not process in some emulator configurations (MCP/RDKEY timing)
+- Network connectivity requires proper Uthernet II emulation configuration
+- `/SAVE` may fail in emulator environments with disk write restrictions
+
 ## [1.0.0] - 2025-01-26
 
 ### Added
