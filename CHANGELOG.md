@@ -26,8 +26,8 @@ All slash commands tested and verified functional:
 ### Known Limitations
 
 - **MCP menu testing**: The ESC menu displays correctly but MCP automated testing cannot reliably send keys to the menu's RDKEY loop due to debugger/emulator timing. The menu works correctly when tested interactively.
-- **Network connectivity**: Requires proper Uthernet II emulation configuration (vmnet gateway)
-- **Disk writes**: `/SAVE` may fail in emulator environments with disk write restrictions
+- **Network connectivity**: Bobbin emulator does not support full Uthernet II TCP operations. For network testing, use AppleWin or MAME/Ample which have TCP support, or test on real hardware with an actual Uthernet II card.
+- **Disk writes**: `/SAVE` fails in Bobbin because it doesn't fully support ProDOS MLI file write operations. The agent's ProDOS code is correct and works on real hardware or emulators with full MLI support.
 
 ## [1.0.0] - 2025-01-26
 
