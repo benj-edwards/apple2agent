@@ -14,6 +14,8 @@ All notable changes to the Apple II Agent project.
 
 - **/CLEAR command not recognized**: The command parser checked for 'C' commands but only handled `/CODE` (checking for 'O' at position 2). `/CLEAR` (with 'L' at position 2) fell through to "UNKNOWN COMMAND". Fixed by adding a check for 'L' to handle `/CLEAR`.
 
+- **ESC menu key input not working**: The menu's RDKEY handler used `and #$DF` which doesn't clear the high bit that RDKEY sets. This caused key comparisons to fail (e.g., '1' = $B1 & $DF = $91, not $31). Fixed by using `and #$7F` to properly clear the high bit.
+
 ### Verified Working
 
 All slash commands tested and verified functional:
@@ -23,9 +25,9 @@ All slash commands tested and verified functional:
 
 ### Known Limitations
 
-- ESC menu displays but key input may not process in some emulator configurations (MCP/RDKEY timing)
-- Network connectivity requires proper Uthernet II emulation configuration
-- `/SAVE` may fail in emulator environments with disk write restrictions
+- **MCP menu testing**: The ESC menu displays correctly but MCP automated testing cannot reliably send keys to the menu's RDKEY loop due to debugger/emulator timing. The menu works correctly when tested interactively.
+- **Network connectivity**: Requires proper Uthernet II emulation configuration (vmnet gateway)
+- **Disk writes**: `/SAVE` may fail in emulator environments with disk write restrictions
 
 ## [1.0.0] - 2025-01-26
 
