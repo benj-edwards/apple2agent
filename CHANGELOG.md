@@ -16,6 +16,8 @@ All notable changes to the Apple II Agent project.
 
 - **ESC menu key input not working**: The menu's RDKEY handler used `and #$DF` which doesn't clear the high bit that RDKEY sets. This caused key comparisons to fail (e.g., '1' = $B1 & $DF = $91, not $31). Fixed by using `and #$7F` to properly clear the high bit.
 
+- **Memory layout collision with IP65**: The agent's `RECV_BUFFER` ($8000) and `SCREEN_SAVE` ($9000) addresses overlapped with IP65's BSS segment (which extends to $9D40, including ethernet buffers at $8ED7 and $94C5). When IP65 sent packets, it corrupted these buffers. Fixed by moving `SCREEN_SAVE` to $A000 and `RECV_BUFFER` to $A400.
+
 ### Verified Working
 
 All slash commands tested and verified functional:
@@ -25,9 +27,16 @@ All slash commands tested and verified functional:
 
 ### Known Limitations
 
-- **MCP menu testing**: The ESC menu displays correctly but MCP automated testing cannot reliably send keys to the menu's RDKEY loop due to debugger/emulator timing. The menu works correctly when tested interactively.
-- **Network connectivity**: Bobbin emulator does not support full Uthernet II TCP operations. For network testing, use AppleWin or MAME/Ample which have TCP support, or test on real hardware with an actual Uthernet II card.
+- **MCP testing during network operations**: The MCP debugger interface has timing issues when the agent is performing network operations. The screen may appear blank via MCP tools even when the agent is functioning correctly. Test network features interactively or via direct stdin/stdout.
 - **Disk writes**: `/SAVE` fails in Bobbin because it doesn't fully support ProDOS MLI file write operations. The agent's ProDOS code is correct and works on real hardware or emulators with full MLI support.
+
+### Network Testing
+
+TCP networking works correctly in Bobbin with Uthernet II emulation:
+- Agent connects to proxy at configured IP:port
+- A2P protocol packets are exchanged successfully
+- Proxy responds with AI messages (requires `ANTHROPIC_API_KEY` environment variable)
+- Virtual network redirects 192.168.64.x and 192.168.65.x to localhost
 
 ## [1.0.0] - 2025-01-26
 

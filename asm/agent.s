@@ -78,11 +78,13 @@ RESP_FLAG_FINAL = $01           ; This is the final chunk
 
 ;-------------------------------------------------------------------------------
 ; Memory Layout
+; NOTE: These addresses must be ABOVE the BSS segment end (~$9D40)
+; to avoid collision with IP65's ethernet buffers
 ;-------------------------------------------------------------------------------
-RECV_BUFFER     = $8000         ; 4KB receive buffer (circular)
+SCREEN_SAVE     = $A000         ; 1KB screen save buffer ($A000-$A3FF)
+RECV_BUFFER     = $A400         ; 4KB receive buffer (circular) ($A400-$B3FF)
 RECV_BUF_SIZE   = $1000         ; 4096 bytes
 RECV_BUF_MASK   = $0FFF         ; Mask for wrap-around
-SCREEN_SAVE     = $9000         ; 1KB screen save buffer
 
 ; Configuration at $0300
 CONFIG_BASE     = $0300
