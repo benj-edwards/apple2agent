@@ -229,6 +229,10 @@ class AgenticClaude:
         self.conversation: List[Dict] = []
         self.emulator_running = False
 
+        # Context management - compact when approaching limit
+        self.max_context_tokens = 150000  # Leave headroom for 200k context
+        self.compact_threshold = 100000   # Start compacting at this level
+
     def _execute_tool(self, tool_name: str, tool_input: dict) -> str:
         """Execute a tool and return the result."""
 
@@ -312,6 +316,109 @@ class AgenticClaude:
         else:
             return f"ERROR: Unknown tool: {tool_name}"
 
+    def _estimate_tokens(self, messages: List[Dict]) -> int:
+        """Estimate token count for messages (rough: ~4 chars per token)."""
+        total_chars = 0
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                total_chars += len(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        if "text" in block:
+                            total_chars += len(block["text"])
+                        elif "content" in block:
+                            total_chars += len(str(block["content"]))
+                        elif "input" in block:
+                            total_chars += len(json.dumps(block["input"]))
+        return total_chars // 4
+
+    def _compact_conversation(self, model: str) -> bool:
+        """
+        Compact conversation by summarizing older messages.
+        Returns True if compaction was performed.
+        """
+        if not self.client:
+            return False
+
+        estimated = self._estimate_tokens(self.conversation)
+        if estimated < self.compact_threshold:
+            return False
+
+        self.send_status("COMPACTING MEMORY...")
+        print(f"[Agent] Compacting conversation: ~{estimated} tokens")
+
+        # Keep the most recent messages (last 10 or so)
+        keep_recent = 10
+        if len(self.conversation) <= keep_recent:
+            return False
+
+        old_messages = self.conversation[:-keep_recent]
+        recent_messages = self.conversation[-keep_recent:]
+
+        # Summarize the old messages
+        summary_prompt = """Summarize this conversation history concisely.
+Focus on:
+- What the user originally requested
+- Key decisions made
+- Code that was written/tested
+- Current state of the Apple II and emulator
+- Any errors encountered and how they were resolved
+
+Be concise but preserve important technical details."""
+
+        try:
+            # Format old messages for summarization
+            old_text = ""
+            for msg in old_messages:
+                role = msg.get("role", "unknown")
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    old_text += f"{role.upper()}: {content}\n\n"
+                elif isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict):
+                            if "text" in block:
+                                old_text += f"{role.upper()}: {block['text']}\n\n"
+                            elif block.get("type") == "tool_use":
+                                old_text += f"{role.upper()}: [Used tool: {block.get('name')}]\n\n"
+                            elif block.get("type") == "tool_result":
+                                result = block.get("content", "")[:500]
+                                old_text += f"TOOL RESULT: {result}...\n\n"
+
+            response = self.client.messages.create(
+                model=model,
+                max_tokens=2000,
+                messages=[{
+                    "role": "user",
+                    "content": f"{summary_prompt}\n\n---\n\n{old_text}"
+                }]
+            )
+
+            summary = response.content[0].text
+
+            # Replace conversation with summary + recent messages
+            self.conversation = [
+                {
+                    "role": "user",
+                    "content": f"[CONVERSATION SUMMARY]\n{summary}\n[END SUMMARY - Recent messages follow]"
+                },
+                {
+                    "role": "assistant",
+                    "content": "I understand the context from our previous conversation. Let me continue from where we left off."
+                }
+            ] + recent_messages
+
+            new_estimate = self._estimate_tokens(self.conversation)
+            print(f"[Agent] Compacted: ~{estimated} -> ~{new_estimate} tokens")
+            self.send_status("MEMORY COMPACTED")
+            return True
+
+        except Exception as e:
+            print(f"[Agent] Compaction failed: {e}")
+            return False
+
     def run_agentic(self, user_message: str, model: str = "claude-sonnet-4-latest",
                     max_turns: int = 20) -> str:
         """
@@ -362,6 +469,9 @@ Be concise - the Apple II has limited screen space."""
         self.send_status("THINKING...")
 
         for turn in range(max_turns):
+            # Check if we need to compact the conversation
+            self._compact_conversation(model)
+
             try:
                 response = self.client.messages.create(
                     model=model,
