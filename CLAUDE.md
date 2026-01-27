@@ -1,112 +1,122 @@
 # Apple II Agent - Claude Code Instructions
 
-This project enables AI-controlled Apple IIe over TCP/IP using Uthernet II.
+Interactive AI chat client for Apple IIe over TCP/IP using Uthernet II.
 
 ## Quick Start
 
-### 1. Start the Proxy Server
+### 1. Start the Unified Proxy
 ```bash
-cd proxy && python3 remote_proxy.py
+cd proxy && python3 unified_proxy.py
+```
+
+Set your API key first:
+```bash
+export ANTHROPIC_API_KEY="your-key-here"
 ```
 
 ### 2. Boot the Apple IIe
-- Insert `disks/agent.dsk` (or boot via network)
-- The remote shell auto-runs and connects to the proxy
-- Proxy shows `[READY]` when connected
+- Insert `disks/agent_test.dsk`
+- Run: `BRUN AGENT.BIN`
+- Configure IP with `/SETIP` and `/PORT` commands
 
-### 3. Send Commands
-The proxy provides an interactive shell. Commands:
+### 3. Chat with Claude
+Type messages at the `CLAUDE>` prompt. The agent sends to the proxy, which forwards to Claude API.
+
+---
+
+## Agent Commands
 
 | Command | Description | Example |
 |---------|-------------|---------|
-| `P addr` | Peek (read byte) | `P C000` |
-| `O addr val` | Poke (write byte) | `O 0400 C1` |
-| `D addr len` | Dump memory | `D 0400 40` |
-| `L addr hex...` | Load bytes | `L 6000 A9 00 8D...` |
-| `C addr` | Call subroutine | `C 6000` |
-| `QS text` | Quick string (print) | `QS HELLO` |
-| `SCAN` | Memory scan | `SCAN` |
-| `X` | Exit shell | `X` |
+| `/HELP` | Show commands | `/HELP` |
+| `/IP` | Show current proxy IP | `/IP` |
+| `/SETIP` | Set proxy IP address | `/SETIP 192.168.1.100` |
+| `/PORT` | Set proxy port | `/PORT 8080` |
+| `/MODEL` | Set AI model | `/MODEL S`, `/MODEL O`, `/MODEL H` |
+| `/SAVE` | Save config to disk | `/SAVE` |
+| `/CODE` | Generate BASIC program | `/CODE DRAW A CIRCLE` |
+| `/CLEAR` | Clear screen | `/CLEAR` |
+| `ESC` | Show menu | Press ESC key |
 
----
+### AI Models
 
-## Agentic Mode
+| Command | Model | Description |
+|---------|-------|-------------|
+| `/MODEL S` | Sonnet | Default - balanced speed/quality |
+| `/MODEL O` | Opus | Most capable - best for complex tasks |
+| `/MODEL H` | Haiku | Fastest - best for simple queries |
 
-For autonomous operation, use the agentic proxy:
-```bash
-cd proxy && python3 agentic_proxy.py
+All config changes (IP, port, model) are auto-saved to disk.
+
+### Example Session
+```
+CLAUDE> HELLO
+HELLO! I'M CLAUDE, AN AI ASSISTANT.
+HOW CAN I HELP YOU TODAY?
+
+CLAUDE> /CODE PRINT HELLO WORLD
+Generating...
+...
+PROGRAM LOADED - TYPE RUN
 ```
 
-This provides:
-- BASIC program injection via tokenizer
-- Screen capture and parsing
-- Error detection and recovery
-- Full autonomous loop
-
 ---
 
-## IP Addresses
+## A2P Protocol
 
-| Target | IP Address | Port | Disk |
-|--------|------------|------|------|
-| Real Apple IIe | 192.168.1.50 | 8080 | `agent.dsk` |
-| Bobbin emulator | 192.168.64.1 | 8080 | `agent_test.dsk` |
+The agent uses A2P (Apple II Protocol) for reliable communication:
 
-To change IP, edit `asm/remote_shell.s` lines 37-40 and rebuild.
+**Packet format:** `[A2][Type][Len:2][Seq][Data...][Checksum]`
+
+| Type | Name | Description |
+|------|------|-------------|
+| 0x00 | INIT | Initialize connection |
+| 0x01 | CHAT | User message |
+| 0x02 | RESP | AI response (streaming) |
+| 0x03 | CODE | BASIC code chunk |
+| 0x04 | STATUS | Status message |
+| 0x05 | ACK | Acknowledgment |
+| 0x06 | NACK | Request retransmit |
+| 0x0F | ERR | Error message |
 
 ---
 
 ## Build Process
 
 ```bash
-# Build the remote shell
-make
+# Build the unified agent
+make agent
 
-# Install to production disk (real hardware)
-make install
+# Install to test disk
+make install-agent-test
 
-# Install to test disk (emulator)
-make install-test
+# Install to production disk
+make install-agent
 
-# View disk contents
-make catalog
-```
+# Start unified proxy
+make unified-proxy
 
-### Manual Build
-
-```bash
-# Assemble
-ca65 --cpu 6502 -I libs/ip65/inc -o build/remote_shell.o asm/remote_shell.s
-
-# Link
-ld65 -C asm/agent.cfg -o build/REMOTE.BIN build/remote_shell.o \
-    libs/ip65/ip65_tcp.lib \
-    libs/ip65/drivers/a2uther2.lib \
-    apple2.lib
-
-# Add to disk
-python3 tools/prodos.py add disks/agent.dsk build/REMOTE.BIN REMOTE.BIN BIN 6000
+# Run protocol tests
+make test
 ```
 
 ---
 
-## MCP Tools
+## IP Configuration
 
-The MCP server provides Apple II control tools:
+The agent stores IP configuration at memory $0300-$0307:
+- `$0300-$0303` - Proxy IP (4 bytes)
+- `$0304-$0305` - Port (2 bytes, little-endian)
+- `$0307` - Magic byte ($A2 = valid config)
 
-### ProDOS Disk Tools
-- `prodos_list` - List files on disk
-- `prodos_add` - Add binary file to disk
-- `prodos_del` - Delete file from disk
+**Default:** 192.168.64.1:8080 (Bobbin/MAME vmnet gateway)
 
-### Emulator Tools (Bobbin)
-- `boot` - Start emulator
-- `type_text` - Type on keyboard
-- `read_screen` - Capture text screen
-- `capture_gr/hgr` - Capture graphics
-- `peek/poke` - Memory access
-- `run_basic` - Execute BASIC command
-- `inject_tokenized_basic` - Load BASIC program
+**Commands:**
+- `/SETIP 192.168.1.100` - Set proxy IP address
+- `/PORT 8080` - Set proxy port
+- `/SAVE` - Save config to disk as `CLAUDE.CONF`
+
+Config is automatically loaded from `CLAUDE.CONF` on startup if it exists.
 
 ---
 
@@ -114,38 +124,28 @@ The MCP server provides Apple II control tools:
 
 ```
 apple2agent/
-├── CLAUDE.md           # This file
-├── README.md           # Human setup guide
-├── Makefile            # Build automation
-├── .mcp.json           # MCP server config
+├── CLAUDE.md              # This file
+├── Makefile               # Build automation
 │
-├── proxy/              # Python proxy servers
-│   ├── remote_proxy.py       # Main interactive proxy
-│   ├── agentic_proxy.py      # Autonomous agent loop
-│   ├── basic_tokenizer.py    # BASIC tokenizer
-│   ├── program_injector.py   # Program injection
-│   ├── screen_reader.py      # Screen capture
-│   └── error_parser.py       # Error detection
+├── proxy/                 # Python proxy servers
+│   ├── unified_proxy.py   # Main proxy (A2P protocol)
+│   ├── a2p_protocol.py    # Protocol encoder/decoder
+│   └── basic_tokenizer_streaming.py
 │
-├── src/apple2_mcp/     # MCP server
-│   ├── server.py
-│   └── emulator.py
+├── asm/                   # Assembly sources
+│   ├── agent.s            # Unified agent binary
+│   └── agent.cfg          # Linker config
 │
-├── asm/                # Assembly sources
-│   ├── remote_shell.s  # Remote shell (main)
-│   └── agent.cfg       # Linker config
+├── tests/                 # Test suite
+│   ├── test_protocol.py   # Protocol unit tests
+│   └── test_e2e.py        # End-to-end test
 │
-├── libs/ip65/          # TCP/IP stack
+├── disks/                 # Disk images
+│   ├── agent_test.dsk     # Testing disk
+│   └── agent.dsk          # Production disk
 │
-├── tools/              # Disk utilities
-│   └── prodos.py       # ProDOS disk tool
-│
-├── disks/              # Disk images
-│   ├── agent.dsk       # Production (192.168.1.50)
-│   └── agent_test.dsk  # Testing (192.168.64.1)
-│
-└── build/              # Build output
-    └── REMOTE.BIN      # Compiled binary
+└── build/                 # Build output
+    └── AGENT.BIN          # Compiled agent (~9.5KB)
 ```
 
 ---
@@ -153,71 +153,62 @@ apple2agent/
 ## Memory Map
 
 ```
-$0000-$00FF   Zero page (IP65 uses $06-$07)
-$0100-$01FF   Stack
-$0200-$02FF   Input buffer
+$0300-$030F   Configuration (IP, port, flags)
+$03F5-$03F7   Ampersand hook vector
 $0400-$07FF   Text screen
-$0800-$5FFF   BASIC / free RAM
-$6000-$7A72   REMOTE SHELL (~7KB)
-$7A73-$95FF   Free RAM
-$9600-$BFFF   ProDOS
-$C000-$C0FF   Soft switches (DANGEROUS)
-$D000-$FFFF   ROM
+$0801-$5FFF   BASIC program area (~22KB)
+$6000-$7FFF   AGENT.BIN code (~9.5KB)
+$8000-$8FFF   Receive buffer (4KB circular)
+$9000-$93FF   Screen save buffer
 ```
-
-### Safe PEEK Regions
-- `$0000-$BFFF` - Main RAM
-- `$D000-$FFFF` - ROM
-
-### AVOID
-- `$C000-$C0FF` - Soft switches have side effects!
 
 ---
 
-## Remote Shell Protocol
+## Testing
 
-```
-Apple II -> Proxy:  READY\r\n
-Proxy -> Apple II:  P C000\r\n     (command)
-Apple II -> Proxy:  OK 8D\r\n      (response)
-```
-
-### Response Codes
-- `OK value` - Success with hex value
-- `OK` - Success (no value)
-- `ERR msg` - Error with message
-
----
-
-## Testing with Emulator
-
-### Bobbin (Recommended)
+### Protocol Test (no hardware needed)
 ```bash
 # Terminal 1: Start proxy
-cd proxy && python3 remote_proxy.py
+python3 proxy/unified_proxy.py
 
-# Terminal 2: Run Bobbin
-cd /path/to/bobbin/src
-./bobbin --simple -m enhanced --uthernet2 --disk /path/to/disks/agent_test.dsk
+# Terminal 2: Run E2E test
+python3 tests/test_e2e.py
 ```
 
-### MAME (via Ample)
+### Emulator Test (Bobbin)
 ```bash
-/Applications/Ample.app/Contents/MacOS/mame64 apple2e \
-  -flop1 disks/agent.dsk \
-  -window \
-  -sl3 uthernet2
+# Start proxy
+python3 proxy/unified_proxy.py
+
+# Run Bobbin with Uthernet II
+./bobbin --simple -m enhanced --uthernet2 --disk disks/agent_test.dsk
 ```
 
-Note: Homebrew MAME does NOT have Uthernet II.
+### Real Hardware
+1. Start proxy on your computer
+2. Boot Apple IIe with Uthernet II
+3. Run: `BRUN AGENT.BIN`
+4. Configure IP: `/SETIP <your-computer-ip>`
+5. Chat away!
 
 ---
 
 ## Common Issues
 
-| Problem | Cause | Solution |
-|---------|-------|----------|
-| "Connection refused" | Wrong IP in binary | Rebuild with correct IP |
-| Network timeout | Wrong emulator | Use Ample MAME or Bobbin |
-| PEEK crashes | Zero page conflict | IP65 uses $06-$07 |
-| Binary crashes | Wrong load address | Use agent.cfg ($6000) |
+| Problem | Solution |
+|---------|----------|
+| "CONNECTION FAILED" | Check `/IP`, use `/SETIP` to fix |
+| "API KEY NOT SET" | Export `ANTHROPIC_API_KEY` |
+| Network init fails | Ensure Uthernet II in slot 3 |
+| Garbled display | Use `/CLEAR` to redraw |
+
+---
+
+## MCP Tools
+
+For Claude Code integration, MCP tools are available:
+- `boot` - Start Bobbin emulator
+- `read_screen` - Capture text display
+- `type_text` - Send keyboard input
+- `peek/poke` - Memory access
+- `prodos_list/add/del` - Disk operations
