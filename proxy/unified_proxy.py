@@ -390,6 +390,9 @@ class AppleIISession:
                         print(f"[Session] {self.addr} disconnected")
                         break
 
+                    # Debug: show raw data received
+                    print(f"[Session] {self.addr} recv {len(data)} bytes: {data[:20].hex()}...")
+
                     # Decode packets
                     for packet in self.proto.decode_stream(data):
                         self._handle_packet(packet)
