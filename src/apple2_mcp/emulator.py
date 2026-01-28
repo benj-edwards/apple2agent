@@ -11,6 +11,7 @@ Provides methods for:
 
 import os
 import re
+import signal
 import time
 import shutil
 from pathlib import Path
@@ -19,6 +20,9 @@ from typing import Optional
 import pexpect
 
 from .screen import decode_screen, SCREEN_LINE_ADDRESSES, SCREEN_WIDTH, SCREEN_HEIGHT
+
+# Path where Bobbin writes screen dump on SIGUSR1
+SIGUSR1_SCREEN_PATH = "/tmp/bobbin_screen.txt"
 
 
 class BobbinError(Exception):
@@ -417,6 +421,55 @@ class Emulator:
         """
         memory = self.read_screen_memory()
         return decode_screen(memory)
+
+    def read_screen_nonblocking(self, timeout: float = 1.0) -> list[str]:
+        """Read the screen without stopping emulation using SIGUSR1.
+
+        This method sends SIGUSR1 to Bobbin, which triggers a non-blocking
+        screen dump to /tmp/bobbin_screen.txt. This is ideal for capturing
+        screen state during network operations without disrupting TCP state.
+
+        Args:
+            timeout: Maximum time to wait for screen file to appear
+
+        Returns:
+            List of 24 strings, each 40 characters
+        """
+        if not self.is_running:
+            raise BobbinError("Emulator not running")
+
+        # Remove old screen file if it exists
+        try:
+            os.unlink(SIGUSR1_SCREEN_PATH)
+        except FileNotFoundError:
+            pass
+
+        # Send SIGUSR1 to Bobbin process
+        os.kill(self.process.pid, signal.SIGUSR1)
+
+        # Wait for screen file to appear
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if os.path.exists(SIGUSR1_SCREEN_PATH):
+                # Small delay to ensure file is fully written
+                time.sleep(0.05)
+                try:
+                    with open(SIGUSR1_SCREEN_PATH, 'r') as f:
+                        lines = f.read().split('\n')
+                    # Return first 24 lines, padded to 40 chars
+                    result = []
+                    for i in range(24):
+                        if i < len(lines):
+                            line = lines[i][:40].ljust(40)
+                        else:
+                            line = ' ' * 40
+                        result.append(line)
+                    return result
+                except (IOError, OSError):
+                    pass  # File not ready yet, keep waiting
+            time.sleep(0.02)
+
+        raise BobbinError("Timeout waiting for screen capture via SIGUSR1")
 
     def inject_keys(self, text: str, include_return: bool = False) -> None:
         """Inject keystrokes via debugger for reliable AI agent input.
