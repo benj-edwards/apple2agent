@@ -523,7 +523,7 @@ Be concise but preserve important technical details."""
             print(f"[Agent] Compaction failed: {e}")
             return False
 
-    def run_agentic(self, user_message: str, model: str = "claude-sonnet-4-latest",
+    def run_agentic(self, user_message: str, model: str = "claude-sonnet-4-20250514",
                     max_turns: int = 20) -> str:
         """
         Run the agentic loop.
