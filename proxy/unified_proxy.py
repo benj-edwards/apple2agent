@@ -59,6 +59,7 @@ from a2p_protocol import (
 )
 from basic_tokenizer_streaming import tokenize_program, detokenize_program
 from agentic_claude import AgenticClaude, get_agentic_claude
+from emulator_bridge import mcp_call as emulator_mcp_call, get_bridge
 
 # Try to import anthropic
 try:
@@ -825,19 +826,18 @@ def run_test_mode():
     print("Test mode - Bobbin integration")
     print("This mode tests the proxy with the Bobbin emulator")
     print()
-    print("To enable agentic mode with emulator tools:")
-    print("  1. Connect Apple II")
-    print("  2. Type /AGENT to enable agentic mode")
-    print("  3. Claude will use emulator for testing before deploying")
+    print("Agentic mode is ON by default - Claude uses emulator for testing")
     print()
 
-    # In test mode, we could wire up MCP calls here
-    # For now, just run the proxy (MCP calls will show errors without connection)
+    # Use emulator bridge for MCP calls
     try:
-        proxy = UnifiedProxy()
+        proxy = UnifiedProxy(mcp_call=emulator_mcp_call)
         proxy.start()
     except KeyboardInterrupt:
         print("\nTest mode ended")
+    finally:
+        # Clean up emulator on exit
+        get_bridge().shutdown()
 
 
 def main():
@@ -858,8 +858,12 @@ def main():
     if args.test:
         run_test_mode()
     else:
-        proxy = UnifiedProxy(args.host, args.port)
-        proxy.start()
+        # Always use emulator bridge for agentic mode
+        try:
+            proxy = UnifiedProxy(args.host, args.port, mcp_call=emulator_mcp_call)
+            proxy.start()
+        finally:
+            get_bridge().shutdown()
 
 
 if __name__ == '__main__':
