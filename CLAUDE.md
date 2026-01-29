@@ -93,6 +93,78 @@ Claude will:
 
 **Just like Claude Code** - you watch Claude work, step by step, on your Apple II screen.
 
+## Bobbin Control Socket (USE THIS!)
+
+**The control socket is the reliable way to control the emulator.** It bypasses all pexpect/PTY/signal issues.
+
+### Python Client
+```python
+from apple2_mcp.control_socket import BobbinControlSocket
+
+sock = BobbinControlSocket('/tmp/bobbin.sock')
+sock.connect()
+
+# Read screen
+lines = sock.read_screen()  # 24 lines of 40 chars
+
+# Memory access
+data = sock.peek(0x400, 40)  # Read 40 bytes from $0400
+sock.poke(0x6000, [0xA9, 0x00, 0x60])  # Write bytes
+
+# CPU control
+cpu = sock.get_cpu_state()  # {pc, a, x, y, sp, p, cycles, frames}
+sock.step(100)  # Single-step 100 instructions
+sock.pause()    # Pause emulation
+sock.resume()   # Resume
+
+# Breakpoints
+sock.break_set(0x6000)   # Break at address
+sock.watch_set(0x400)    # Break when memory changes
+bps = sock.break_list()  # List all breakpoints
+
+# Disks
+sock.disk_insert('/path/to/disk.dsk', drive=1)
+sock.disk_eject(drive=1)
+status = sock.disk_status()  # {active, spinning}
+
+# Graphics capture
+sock.capture_hgr('/tmp/screen.ppm', page=1, color=True)
+sock.capture_gr('/tmp/lores.ppm')
+
+# State snapshots
+sock.save_state('/tmp/state.bin')
+sock.load_state('/tmp/state.bin')
+
+# System info
+switches = sock.get_softswitches()  # {text, hires, page2, ...}
+slots = sock.get_slots()  # {3: 'uthernet2', 6: 'disk2', ...}
+
+# Mouse control
+sock.mouse(x=140, y=96, button=True)
+
+sock.disconnect()
+```
+
+### Available Commands (Protocol v2.0)
+
+| Category | Commands |
+|----------|----------|
+| **Basic** | `ping`, `quit` |
+| **Memory** | `peek`, `poke`, `load`, `screen`, `screen_raw` |
+| **CPU** | `cpu`, `step`, `reset`, `pause`, `resume`, `call`, `disasm` |
+| **Breakpoints** | `break_set`, `break_clear`, `break_list`, `break_enable`, `break_disable`, `watch_set` |
+| **Disks** | `disk_status`, `disk_insert`, `disk_eject` |
+| **Graphics** | `hgr`, `gr`, `dhgr`, `dgr` (export to PPM) |
+| **State** | `save_state`, `load_state` |
+| **System** | `keys`, `mouse`, `slots`, `softswitches`, `speed`, `cycles`, `trace` |
+
+### Starting Bobbin with Socket
+```bash
+bobbin --simple --control-socket /tmp/bobbin.sock -m enhanced --disk disks/agent.dsk
+```
+
+The MCP server (`emulator.py`) automatically uses the socket when available and falls back to pexpect if not.
+
 ## Key Files
 
 | File | Purpose |
@@ -102,6 +174,8 @@ Claude will:
 | `proxy/basic_tokenizer_streaming.py` | Tokenizes BASIC for injection |
 | `asm/agent.s` | Apple II client (6502 assembly) |
 | `src/apple2_mcp/` | MCP server for emulator control |
+| `src/apple2_mcp/control_socket.py` | **Control socket client** - USE THIS for emulator control |
+| `bobbin_socket.md` | Control socket design document |
 
 ## Commands
 
@@ -156,9 +230,11 @@ The fix for agentic mode code injection is in `asm/agent.s`:
 
 ## NEVER FORGET
 
-1. **Agentic mode is ON by default** - `/AGENT` toggles it OFF for simple chat
-2. **Progress streams to Apple II** - user watches Claude work in real-time
-3. **agentic_claude.py has the loop** - 20 turns of tool use
-4. **Test in emulator first** - then deploy to real hardware
-5. **The mission is autonomous coding** - not just chat
-6. **/CODE command WORKS** - use it while agentic mode injection is broken
+1. **USE THE CONTROL SOCKET** - `BobbinControlSocket` is the reliable way to control the emulator
+2. **Agentic mode is ON by default** - `/AGENT` toggles it OFF for simple chat
+3. **Progress streams to Apple II** - user watches Claude work in real-time
+4. **agentic_claude.py has the loop** - 20 turns of tool use
+5. **Test in emulator first** - then deploy to real hardware
+6. **The mission is autonomous coding** - not just chat
+7. **/CODE command WORKS** - use it while agentic mode injection is broken
+8. **Control socket has EVERYTHING** - peek, poke, step, breakpoints, graphics capture, state save/load
