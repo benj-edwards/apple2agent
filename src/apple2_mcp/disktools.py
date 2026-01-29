@@ -400,8 +400,20 @@ def tokenize_line(line: str) -> bytes:
 
         # Try to match keywords (longest first)
         matched = False
+        line_upper = line.upper()
         for keyword in sorted(BASIC_TOKENS.keys(), key=len, reverse=True):
-            if line[i:i+len(keyword)].upper() == keyword:
+            if line_upper[i:i+len(keyword)] == keyword:
+                # Check word boundary for alpha keywords to avoid matching
+                # OR inside COLOR, AND inside DEMAND, TO inside GOTO, etc.
+                if keyword.isalpha() or keyword.endswith('('):
+                    # Check if followed by alphanumeric (part of variable name)
+                    end_pos = i + len(keyword)
+                    if end_pos < len(line) and line[end_pos].isalnum():
+                        continue  # Skip - it's part of a variable name
+                    # Check if preceded by alphanumeric (part of variable name)
+                    if i > 0 and line[i-1].isalnum():
+                        continue  # Skip - it's part of a variable name
+
                 output.append(BASIC_TOKENS[keyword])
                 i += len(keyword)
                 matched = True

@@ -208,6 +208,18 @@ def tokenize_line_content(content: str) -> bytearray:
 
         for keyword, token in TOKENS:
             if remaining.startswith(keyword):
+                # Check word boundary for alpha keywords to avoid matching
+                # OR inside COLOR, AND inside DEMAND, TO inside GOTO, etc.
+                # Operators (+, -, *, /, etc.) don't need boundary checks
+                if keyword.isalpha() or keyword.endswith('('):
+                    # Check if followed by alphanumeric (part of variable name)
+                    end_pos = i + len(keyword)
+                    if end_pos < len(content) and content[end_pos].isalnum():
+                        continue  # Skip - it's part of a variable name
+                    # Check if preceded by alphanumeric (part of variable name)
+                    if i > 0 and content[i-1].isalnum():
+                        continue  # Skip - it's part of a variable name
+
                 result.append(token)
                 i += len(keyword)
                 matched = True
