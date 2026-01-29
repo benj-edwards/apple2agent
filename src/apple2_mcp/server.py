@@ -1011,13 +1011,15 @@ async def _call_tool_impl(name: str, args: dict[str, Any]) -> str:
     # --- Screen ---
     elif name == "read_screen":
         annotated = args.get("annotated", False)
-        nonblocking = args.get("nonblocking", False)
+        # Default to nonblocking (SIGUSR1) since debugger entry via pexpect is unreliable
+        nonblocking = args.get("nonblocking", True)
 
         if nonblocking:
             # Use SIGUSR1-based capture (doesn't pause emulation)
             lines = emu.read_screen_nonblocking()
         else:
             # Use debugger-based method (pauses emulation briefly)
+            # WARNING: This can cause EOF errors due to pexpect/signal issues
             lines = emu.read_screen()
 
         return format_screen(lines, include_line_numbers=annotated)

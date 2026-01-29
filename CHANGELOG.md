@@ -4,6 +4,43 @@ All notable changes to the Apple II Agent project.
 
 ## [Unreleased]
 
+### Added
+
+- **Bobbin Control Socket**: Added Unix domain socket control interface to Bobbin emulator for reliable AI/MCP integration. This completely bypasses the pexpect/PTY/signal issues that caused debugger operations to fail.
+
+  **Socket Protocol** (JSON over `/tmp/bobbin.sock`):
+  - `ping` - Get version and machine type
+  - `peek` - Read memory (addr, len) → returns byte array
+  - `poke` - Write memory (addr, data[]) → writes bytes
+  - `screen` - Read text screen as 24 decoded ASCII lines
+  - `screen_raw` - Read raw screen memory $0400-$07FF
+  - `keys` - Inject keystrokes into keyboard buffer
+  - `cpu` - Get CPU state (PC, A, X, Y, SP, P flags)
+  - `reset` - Reset CPU (optional cold boot)
+  - `pause` - Pause emulation (enter debugger)
+  - `resume` - Resume emulation
+  - `load` - Load hex data into memory at address
+  - `disk_status` - Get active drive and spinning status
+  - `disk_insert` - Insert disk image into drive 1 or 2
+  - `disk_eject` - Eject disk from drive
+  - `quit` - Exit emulator
+
+  **Files created**:
+  - `bobbin/src/control_socket.c` - Socket server implementation
+  - `src/apple2_mcp/control_socket.py` - Python client library
+  - `bobbin_socket.md` - Design document
+
+  **Files modified in Bobbin**:
+  - `bobbin-internal.h` - Added socket declarations and config option
+  - `config.c` - Added `--control-socket PATH` command line option
+  - `bobbin.c` - Integrated socket init/poll into main loop
+  - `Makefile` - Added control_socket.c to build
+
+  **MCP Integration**:
+  - `emulator.py` now uses socket for peek/poke/screen/keys when available
+  - Falls back to pexpect/debugger method if socket unavailable
+  - Boot automatically connects to socket after emulator starts
+
 ### Fixed
 
 - **prodos_delete.py not freeing disk space**: The ProDOS delete tool was marking directory entries as deleted but not freeing blocks in the volume bitmap, causing "disk full" errors even after deleting files. Fixed by adding `mark_block_free()` and `free_file_blocks()` functions to properly reclaim storage.

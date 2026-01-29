@@ -1,214 +1,164 @@
-# Apple II Agent - Claude Code Instructions
+# Apple II Agent - THE MISSION
 
-Interactive AI chat client for Apple IIe over TCP/IP using Uthernet II.
+## PRIMARY DIRECTIVE
+
+**AGENTIC SOFTWARE DEVELOPMENT FOR APPLE II**
+
+This is NOT a chat system. This is an autonomous AI coding environment.
+
+User speaks naturally → Claude writes code → **Streams progress to Apple II** → Tests in emulator → Deploys to Apple II
+
+**NO SPECIAL COMMANDS NEEDED** - Claude understands natural language and knows how to do everything.
+
+## Goal: Claude Code for Apple II
+
+An **agentic AI development environment** where you talk in natural language and Claude makes Apple II software for you.
+
+```
+You: "Make a program that draws a circle"
+Claude: [boots emulator, writes BASIC, injects, tests, fixes bugs, deploys to Apple II]
+Apple II: [displays circle]
+```
+
+## THE AGENTIC LOOP (This is the core feature!)
+
+**Agentic mode is ON by default.** Every message triggers the full development loop.
+
+`/AGENT` command toggles it OFF if you just want simple chat (rare).
+
+### What Happens When You Type Anything:
+- Claude gets access to tools:
+  - `emulator_boot` - Start Bobbin emulator
+  - `emulator_inject_basic` - Load BASIC program
+  - `emulator_run_basic` - Run commands
+  - `emulator_read_screen` - See output
+  - `emulator_assemble` - Assemble 6502 code
+  - `apple2_send_code` - Deploy to real Apple II
+- Claude runs up to 20 turns of tool use
+- Tests in emulator, then deploys to real hardware
+
+**Key file:** `proxy/agentic_claude.py` - The entire agentic loop
+
+## Architecture
+
+```
+┌──────────────┐      TCP/IP      ┌──────────────┐      API      ┌──────────┐
+│   Apple II   │◄────────────────►│    Proxy     │◄─────────────►│  Claude  │
+│  (Uthernet)  │   A2P Protocol   │              │   + Tools     │   API    │
+└──────────────┘                  └──────────────┘               └──────────┘
+       ▲                                 │
+       │                                 │ MCP (emulator control)
+       │                                 ▼
+       │                          ┌──────────────┐
+       └──────────────────────────│   Bobbin     │
+              Deploy code         │  Emulator    │
+                                  └──────────────┘
+```
 
 ## Quick Start
 
-### 1. Start the Unified Proxy
+### 1. Start Proxy
 ```bash
-cd proxy && python3 unified_proxy.py
+cd proxy && python3 proxyctl.py start
 ```
 
-Set your API key first:
-```bash
-export ANTHROPIC_API_KEY="your-key-here"
+API key in `proxy/.env`:
+```
+ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-### 2. Boot the Apple IIe
-- Insert `disks/agent_test.dsk`
-- Run: `BRUN AGENT.BIN`
-- Configure IP with `/SETIP` and `/PORT` commands
-
-### 3. Chat with Claude
-Type messages at the `CLAUDE>` prompt. The agent sends to the proxy, which forwards to Claude API.
-
----
-
-## Agent Commands
-
-| Command | Description | Example |
-|---------|-------------|---------|
-| `/HELP` | Show commands | `/HELP` |
-| `/IP` | Show current proxy IP | `/IP` |
-| `/SETIP` | Set proxy IP address | `/SETIP 192.168.1.100` |
-| `/PORT` | Set proxy port | `/PORT 8080` |
-| `/MODEL` | Set AI model | `/MODEL S`, `/MODEL O`, `/MODEL H` |
-| `/SAVE` | Save config to disk | `/SAVE` |
-| `/CODE` | Generate BASIC program | `/CODE DRAW A CIRCLE` |
-| `/CLEAR` | Clear screen | `/CLEAR` |
-| `ESC` | Show menu | Press ESC key |
-
-### AI Models
-
-| Command | Model | Description |
-|---------|-------|-------------|
-| `/MODEL S` | Sonnet | Default - balanced speed/quality |
-| `/MODEL O` | Opus | Most capable - best for complex tasks |
-| `/MODEL H` | Haiku | Fastest - best for simple queries |
-
-All config changes (IP, port, model) are auto-saved to disk.
-
-### Example Session
+### 2. Boot Emulator
 ```
-CLAUDE> HELLO
-HELLO! I'M CLAUDE, AN AI ASSISTANT.
-HOW CAN I HELP YOU TODAY?
-
-CLAUDE> /CODE PRINT HELLO WORLD
-Generating...
-...
-PROGRAM LOADED - TYPE RUN
+mcp__apple2-mcp__boot(machine="enhanced", uthernet2=true, disk="disks/agent.dsk")
 ```
 
----
+### 3. Run Agent
+```
+BRUN AGENT.BIN
+```
+
+### 4. Talk Naturally (Agentic mode is ON by default)
+- "Make a program that prints the Fibonacci sequence"
+- "Draw a house using HGR graphics"
+- "Create a number guessing game"
+
+Claude will:
+1. **Stream status updates to Apple II** - you see everything happening in real-time
+2. Boot the emulator
+3. Write the code
+4. Inject and test it
+5. Fix any bugs (iterate until working)
+6. Deploy to your Apple II
+7. Tell you when it's ready
+
+**Just like Claude Code** - you watch Claude work, step by step, on your Apple II screen.
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `proxy/agentic_claude.py` | **THE AGENTIC LOOP** - tools and 20-turn iteration |
+| `proxy/unified_proxy.py` | Main proxy, calls agentic_claude when `/AGENT` enabled |
+| `proxy/basic_tokenizer_streaming.py` | Tokenizes BASIC for injection |
+| `asm/agent.s` | Apple II client (6502 assembly) |
+| `src/apple2_mcp/` | MCP server for emulator control |
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `/AGENT` | Toggle agentic mode OFF (it's ON by default) |
+| `/CLEAR` | Clear conversation history |
+| `/MODEL S/O/H` | Set model (Sonnet/Opus/Haiku) |
+| `/IP` | Show proxy IP |
+| `/HELP` | Show commands |
 
 ## A2P Protocol
-
-The agent uses A2P (Apple II Protocol) for reliable communication:
-
-**Packet format:** `[A2][Type][Len:2][Seq][Data...][Checksum]`
 
 | Type | Name | Description |
 |------|------|-------------|
 | 0x00 | INIT | Initialize connection |
 | 0x01 | CHAT | User message |
 | 0x02 | RESP | AI response (streaming) |
-| 0x03 | CODE | BASIC code chunk |
+| 0x03 | CODE | BASIC code chunk (tokenized) |
 | 0x04 | STATUS | Status message |
 | 0x05 | ACK | Acknowledgment |
-| 0x06 | NACK | Request retransmit |
-| 0x0F | ERR | Error message |
 
----
-
-## Build Process
+## Build
 
 ```bash
-# Build the unified agent
-make agent
-
-# Install to test disk
-make install-agent-test
-
-# Install to production disk
-make install-agent
-
-# Start unified proxy
-make unified-proxy
-
-# Run protocol tests
-make test
+make agent              # Build AGENT.BIN
+make install-agent      # Install to agent.dsk
 ```
 
----
+## Current Status
 
-## IP Configuration
+Working:
+- TCP connection via Uthernet II
+- A2P protocol with reliable packet delivery
+- Claude API integration with streaming
+- Text display on Apple II (40-column)
+- Agentic mode with tools (proxy-side)
+- `/CODE` command - generates and injects BASIC code ✅
+- Code tokenization and memory injection ✅
 
-The agent stores IP configuration at memory $0300-$0307:
-- `$0300-$0303` - Proxy IP (4 bytes)
-- `$0304-$0305` - Port (2 bytes, little-endian)
-- `$0307` - Magic byte ($A2 = valid config)
+Needs fixing:
+- **Agentic mode code injection** - fix ready in `asm/agent.s` (dst_ptr init at offset=0)
+- `tools/prodos.py` corrupts disk images - can't deploy new agent
+- Connection drops after first response (timeout handling)
 
-**Default:** 192.168.64.1:8080 (Bobbin/MAME vmnet gateway)
+## Ready to Deploy (blocked by disk tool)
 
-**Commands:**
-- `/SETIP 192.168.1.100` - Set proxy IP address
-- `/PORT 8080` - Set proxy port
-- `/SAVE` - Save config to disk as `CLAUDE.CONF`
+The fix for agentic mode code injection is in `asm/agent.s`:
+- `handle_code_chunk` now initializes `dst_ptr` to `BASIC_START` when offset=0
+- `inject_program` is called when end marker received to update BASIC pointers
+- Build with `make agent` - file is at `build/AGENT.BIN`
 
-Config is automatically loaded from `CLAUDE.CONF` on startup if it exists.
+## NEVER FORGET
 
----
-
-## Project Structure
-
-```
-apple2agent/
-├── CLAUDE.md              # This file
-├── Makefile               # Build automation
-│
-├── proxy/                 # Python proxy servers
-│   ├── unified_proxy.py   # Main proxy (A2P protocol)
-│   ├── a2p_protocol.py    # Protocol encoder/decoder
-│   └── basic_tokenizer_streaming.py
-│
-├── asm/                   # Assembly sources
-│   ├── agent.s            # Unified agent binary
-│   └── agent.cfg          # Linker config
-│
-├── tests/                 # Test suite
-│   ├── test_protocol.py   # Protocol unit tests
-│   └── test_e2e.py        # End-to-end test
-│
-├── disks/                 # Disk images
-│   ├── agent_test.dsk     # Testing disk
-│   └── agent.dsk          # Production disk
-│
-└── build/                 # Build output
-    └── AGENT.BIN          # Compiled agent (~9.5KB)
-```
-
----
-
-## Memory Map
-
-```
-$0300-$030F   Configuration (IP, port, flags)
-$03F5-$03F7   Ampersand hook vector
-$0400-$07FF   Text screen
-$0801-$5FFF   BASIC program area (~22KB)
-$6000-$7FFF   AGENT.BIN code (~9.5KB)
-$8000-$8FFF   Receive buffer (4KB circular)
-$9000-$93FF   Screen save buffer
-```
-
----
-
-## Testing
-
-### Protocol Test (no hardware needed)
-```bash
-# Terminal 1: Start proxy
-python3 proxy/unified_proxy.py
-
-# Terminal 2: Run E2E test
-python3 tests/test_e2e.py
-```
-
-### Emulator Test (Bobbin)
-```bash
-# Start proxy
-python3 proxy/unified_proxy.py
-
-# Run Bobbin with Uthernet II
-./bobbin --simple -m enhanced --uthernet2 --disk disks/agent_test.dsk
-```
-
-### Real Hardware
-1. Start proxy on your computer
-2. Boot Apple IIe with Uthernet II
-3. Run: `BRUN AGENT.BIN`
-4. Configure IP: `/SETIP <your-computer-ip>`
-5. Chat away!
-
----
-
-## Common Issues
-
-| Problem | Solution |
-|---------|----------|
-| "CONNECTION FAILED" | Check `/IP`, use `/SETIP` to fix |
-| "API KEY NOT SET" | Export `ANTHROPIC_API_KEY` |
-| Network init fails | Ensure Uthernet II in slot 3 |
-| Garbled display | Use `/CLEAR` to redraw |
-
----
-
-## MCP Tools
-
-For Claude Code integration, MCP tools are available:
-- `boot` - Start Bobbin emulator
-- `read_screen` - Capture text display
-- `type_text` - Send keyboard input
-- `peek/poke` - Memory access
-- `prodos_list/add/del` - Disk operations
+1. **Agentic mode is ON by default** - `/AGENT` toggles it OFF for simple chat
+2. **Progress streams to Apple II** - user watches Claude work in real-time
+3. **agentic_claude.py has the loop** - 20 turns of tool use
+4. **Test in emulator first** - then deploy to real hardware
+5. **The mission is autonomous coding** - not just chat
+6. **/CODE command WORKS** - use it while agentic mode injection is broken

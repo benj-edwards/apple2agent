@@ -14,8 +14,11 @@ NUM_TRACKS = 35
 BLOCK_SIZE = 512
 NUM_BLOCKS = 280
 
-# Sector interleave table for ProDOS in DOS-order disks
+# Sector interleave table for ProDOS in DOS-order disks (.dsk/.do)
 PRODOS_INTERLEAVE = [0, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 15]
+
+# Global flag for disk format
+is_prodos_order = False
 
 # ProDOS file types
 FILETYPE_BIN = 0x06
@@ -24,42 +27,58 @@ FILETYPE_SYS = 0xFF
 
 
 def read_block(disk_data, block_num):
-    """Read a ProDOS block from a DOS-order disk image."""
-    track = block_num // 8
-    block_in_track = block_num % 8
+    """Read a ProDOS block from a disk image."""
+    global is_prodos_order
 
-    sector1_logical = block_in_track * 2
-    sector2_logical = block_in_track * 2 + 1
+    if is_prodos_order:
+        # ProDOS order (.po) - blocks are sequential
+        offset = block_num * BLOCK_SIZE
+        return bytearray(disk_data[offset:offset + BLOCK_SIZE])
+    else:
+        # DOS order (.dsk/.do) - need interleaving
+        track = block_num // 8
+        block_in_track = block_num % 8
 
-    sector1_physical = PRODOS_INTERLEAVE[sector1_logical]
-    sector2_physical = PRODOS_INTERLEAVE[sector2_logical]
+        sector1_logical = block_in_track * 2
+        sector2_logical = block_in_track * 2 + 1
 
-    offset1 = (track * SECTORS_PER_TRACK + sector1_physical) * SECTOR_SIZE
-    offset2 = (track * SECTORS_PER_TRACK + sector2_physical) * SECTOR_SIZE
+        sector1_physical = PRODOS_INTERLEAVE[sector1_logical]
+        sector2_physical = PRODOS_INTERLEAVE[sector2_logical]
 
-    block = bytearray(BLOCK_SIZE)
-    block[0:256] = disk_data[offset1:offset1+256]
-    block[256:512] = disk_data[offset2:offset2+256]
+        offset1 = (track * SECTORS_PER_TRACK + sector1_physical) * SECTOR_SIZE
+        offset2 = (track * SECTORS_PER_TRACK + sector2_physical) * SECTOR_SIZE
 
-    return block
+        block = bytearray(BLOCK_SIZE)
+        block[0:256] = disk_data[offset1:offset1+256]
+        block[256:512] = disk_data[offset2:offset2+256]
+
+        return block
 
 
 def write_block(disk_data, block_num, block):
-    """Write a ProDOS block to a DOS-order disk image."""
-    track = block_num // 8
-    block_in_track = block_num % 8
+    """Write a ProDOS block to a disk image."""
+    global is_prodos_order
 
-    sector1_logical = block_in_track * 2
-    sector2_logical = block_in_track * 2 + 1
+    if is_prodos_order:
+        # ProDOS order (.po) - blocks are sequential
+        offset = block_num * BLOCK_SIZE
+        disk_data[offset:offset + BLOCK_SIZE] = block
+    else:
+        # DOS order (.dsk/.do) - need interleaving
+        track = block_num // 8
+        block_in_track = block_num % 8
 
-    sector1_physical = PRODOS_INTERLEAVE[sector1_logical]
-    sector2_physical = PRODOS_INTERLEAVE[sector2_logical]
+        sector1_logical = block_in_track * 2
+        sector2_logical = block_in_track * 2 + 1
 
-    offset1 = (track * SECTORS_PER_TRACK + sector1_physical) * SECTOR_SIZE
-    offset2 = (track * SECTORS_PER_TRACK + sector2_physical) * SECTOR_SIZE
+        sector1_physical = PRODOS_INTERLEAVE[sector1_logical]
+        sector2_physical = PRODOS_INTERLEAVE[sector2_logical]
 
-    disk_data[offset1:offset1+256] = block[0:256]
-    disk_data[offset2:offset2+256] = block[256:512]
+        offset1 = (track * SECTORS_PER_TRACK + sector1_physical) * SECTOR_SIZE
+        offset2 = (track * SECTORS_PER_TRACK + sector2_physical) * SECTOR_SIZE
+
+        disk_data[offset1:offset1+256] = block[0:256]
+        disk_data[offset2:offset2+256] = block[256:512]
 
 
 def find_free_block(disk_data):
@@ -239,12 +258,28 @@ def add_file(disk_data, file_data, prodos_name, file_type, aux_type):
     return True
 
 
+def detect_disk_format(disk_file):
+    """Detect disk format based on extension and content."""
+    global is_prodos_order
+    ext = os.path.splitext(disk_file)[1].lower()
+
+    if ext == '.po':
+        is_prodos_order = True
+        print(f"Detected ProDOS-order disk (.po)")
+    else:
+        is_prodos_order = False
+        print(f"Detected DOS-order disk (.dsk/.do)")
+
+
 def main():
+    global is_prodos_order
+
     if len(sys.argv) < 5:
         print("ProDOS Add File Tool")
         print()
-        print("Usage: prodos_add.py <disk.dsk> <local_file> <prodos_name> <type> [aux]")
+        print("Usage: prodos_add.py <disk.dsk|disk.po> <local_file> <prodos_name> <type> [aux]")
         print()
+        print("Supports both DOS-order (.dsk/.do) and ProDOS-order (.po) disk images")
         print("File types: BIN=06 BAS=FC SYS=FF")
         print("Aux type: load address for BIN, $0801 for BAS")
         sys.exit(1)
@@ -262,6 +297,9 @@ def main():
     if not os.path.exists(local_file):
         print(f"Error: Local file not found: {local_file}")
         sys.exit(1)
+
+    # Detect disk format from extension
+    detect_disk_format(disk_file)
 
     with open(disk_file, 'rb') as f:
         disk_data = bytearray(f.read())

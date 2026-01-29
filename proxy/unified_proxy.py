@@ -40,6 +40,16 @@ _script_dir = os.path.dirname(os.path.abspath(__file__))
 if _script_dir not in sys.path:
     sys.path.insert(0, _script_dir)
 
+# Load .env file if present
+_env_file = os.path.join(_script_dir, '.env')
+if os.path.exists(_env_file):
+    with open(_env_file) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                os.environ.setdefault(key.strip(), value.strip())
+
 # Import protocol and tokenizer
 from a2p_protocol import (
     A2PProtocol, A2PConnection, PacketType, Packet,
@@ -74,9 +84,9 @@ MODEL_HAIKU = 2
 
 # Use aliases that Anthropic maintains - won't break with new releases
 MODEL_IDS = {
-    MODEL_SONNET: "claude-sonnet-4-latest",
-    MODEL_OPUS: "claude-opus-4-latest",
-    MODEL_HAIKU: "claude-haiku-4-latest",
+    MODEL_SONNET: "claude-sonnet-4-20250514",
+    MODEL_OPUS: "claude-opus-4-20250514",
+    MODEL_HAIKU: "claude-haiku-4-20250514",
 }
 
 MODEL_NAMES = {
@@ -369,7 +379,7 @@ class AppleIISession:
         self.columns = 40
         self.model = MODEL_SONNET  # Default model
         self.custom_prompt = None  # Custom system prompt
-        self.agentic_mode = False  # When True, use agentic loop with tools
+        self.agentic_mode = True  # DEFAULT ON - agentic software development is the primary mission
         self.mcp_call = mcp_call  # Function to call MCP tools (for emulator)
         self.agentic_claude: Optional[AgenticClaude] = None
         self.max_turns = 20  # Max agentic turns
@@ -442,6 +452,17 @@ class AppleIISession:
         # Send welcome status with model name
         model_name = MODEL_NAMES.get(self.model, "Sonnet")
         self._send_status(f"CONNECTED - {model_name.upper()}")
+
+        # Initialize agentic Claude if agentic mode is on by default
+        if self.agentic_mode and not self.agentic_claude:
+            self.agentic_claude = AgenticClaude(
+                send_to_apple2=self._send_response,
+                send_status=self._send_status,
+                send_code=self._send_basic_code,
+                mcp_call=self.mcp_call,
+                send_binary=self._send_binary_code
+            )
+            print(f"[Session] Agentic Claude initialized (default ON)")
 
     def _handle_chat(self, packet: Packet):
         """Handle CHAT packet - user message."""
@@ -570,7 +591,9 @@ class AppleIISession:
         """Send raw packet."""
         try:
             self.sock.sendall(packet)
-        except (BrokenPipeError, ConnectionResetError):
+            print(f"[Session] -> sent {len(packet)} bytes: {packet[:20].hex()}...")
+        except (BrokenPipeError, ConnectionResetError) as e:
+            print(f"[Session] Send error: {e}")
             self.running = False
 
     def _send_status(self, message: str):
@@ -717,6 +740,11 @@ class AppleIISession:
             self._send_error(f"BINARY ERROR: {str(e)[:40]}")
 
 
+CONTROL_DIR = '/tmp/claude'
+PID_FILE = f'{CONTROL_DIR}/proxy.pid'
+SHUTDOWN_FILE = f'{CONTROL_DIR}/proxy_shutdown'
+
+
 class UnifiedProxy:
     """Main proxy server."""
 
@@ -733,6 +761,14 @@ class UnifiedProxy:
         """Start the proxy server."""
         self.running = True
 
+        # Set up control files
+        os.makedirs(CONTROL_DIR, exist_ok=True)
+        with open(PID_FILE, 'w') as f:
+            f.write(str(os.getpid()))
+        # Remove any stale shutdown file
+        if os.path.exists(SHUTDOWN_FILE):
+            os.remove(SHUTDOWN_FILE)
+
         # Create TCP server socket
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -744,13 +780,20 @@ class UnifiedProxy:
         print(f"Listening on {self.host}:{self.port}")
         print(f"Protocol: A2P (Apple II Protocol)")
         print(f"Claude API: {'Ready' if self.claude.client else 'Not configured'}")
-        print(f"Agentic Mode: Available (type /AGENT to enable)")
+        print(f"Agentic Mode: ON by default (/AGENT to toggle off)")
+        print(f"PID: {os.getpid()} (touch {SHUTDOWN_FILE} to stop)")
         print()
         print("Waiting for connections...")
         print()
 
         try:
             while self.running:
+                # Check for shutdown file
+                if os.path.exists(SHUTDOWN_FILE):
+                    print("\nShutdown file detected, stopping...")
+                    os.remove(SHUTDOWN_FILE)
+                    break
+
                 try:
                     client, addr = server.accept()
                     # Handle each connection in a thread
@@ -766,6 +809,9 @@ class UnifiedProxy:
         finally:
             server.close()
             self.running = False
+            # Clean up PID file
+            if os.path.exists(PID_FILE):
+                os.remove(PID_FILE)
 
     def stop(self):
         """Stop the server."""

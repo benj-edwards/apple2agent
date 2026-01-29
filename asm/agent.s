@@ -137,6 +137,7 @@ COUT1           = $FDF0         ; Character output (no ESC check)
 RDKEY           = $FD0C         ; Read key with cursor
 VTAB            = $FB5B         ; Set vertical position
 CLREOL          = $FC9C         ; Clear to end of line
+BEEP            = $FBDD         ; Beep speaker
 
 ; Zero page locations used by Monitor
 CH              = $24           ; Horizontal cursor position
@@ -1475,12 +1476,19 @@ receive_response:
         lda #>BASIC_START
         sta dst_ptr+1
 
+        ; Clear pending ACK count
+        lda #0
+        sta pending_ack_count
+
         jsr status_msg
         ldax #msg_receiving
         jsr print
 
 @wait_loop:
         jsr ip65_process
+
+        ; Send any pending ACKs (after callback returns)
+        jsr send_pending_acks
 
         ; Check for completion
         lda recv_state
@@ -1507,6 +1515,9 @@ receive_response:
 ; TCP receive callback - A2P protocol parser
 ;-------------------------------------------------------------------------------
 recv_callback:
+        ; DEBUG: increment counter at $0350 for each callback
+        inc $0350
+
         lda tcp_inbound_data_length
         ora tcp_inbound_data_length+1
         bne @have_data
@@ -1674,7 +1685,31 @@ recv_callback:
         bne @bad_checksum
 
         ; Packet valid - process it
+        ; Save callback state (tcp_send may clobber them)
+        tya
+        pha
+        lda src_ptr
+        pha
+        lda src_ptr+1
+        pha
+        lda tcp_inbound_data_length
+        pha
+        lda tcp_inbound_data_length+1
+        pha
+
         jsr process_packet
+
+        ; Restore callback state
+        pla
+        sta tcp_inbound_data_length+1
+        pla
+        sta tcp_inbound_data_length
+        pla
+        sta src_ptr+1
+        pla
+        sta src_ptr
+        pla
+        tay
 
         ; Reset for next packet
         lda #STATE_MAGIC_0
@@ -1695,11 +1730,24 @@ recv_callback:
 ; Process a complete packet
 ;-------------------------------------------------------------------------------
 process_packet:
-        ; Send ACK
-        jsr send_ack
+        ; Queue ACK for later (don't send from callback)
+        ldx pending_ack_count
+        cpx #8               ; Max 8 pending ACKs
+        bcs @skip_queue
+        lda pkt_seq
+        sta pending_acks,x
+        inc pending_ack_count
+@skip_queue:
 
         ; Dispatch by type
         lda pkt_type
+
+        ; DEBUG: Show packet type
+        pha
+        clc
+        adc #'0'         ; Convert to ASCII digit
+        jsr print_a
+        pla
 
         cmp #PKT_RESP
         beq @handle_resp
@@ -1770,6 +1818,9 @@ handle_response:
 ; Handle CODE packet - store BASIC code
 ;-------------------------------------------------------------------------------
 handle_code_chunk:
+        ; DEBUG: Increment counter at $03F0 (can PEEK later - not in config area)
+        inc $03F0
+
         ; Format: offset(2) + total(2) + data
 
         ; Get offset
@@ -1783,6 +1834,18 @@ handle_code_chunk:
         sta code_total
         lda pkt_buffer+3
         sta code_total+1
+
+        ; If offset=0, initialize dst_ptr to BASIC_START
+        ; This allows code injection in agentic mode without /CODE command
+        lda code_offset
+        ora code_offset+1
+        bne @not_first
+        ; First chunk - initialize destination pointer
+        lda #<BASIC_START
+        sta dst_ptr
+        lda #>BASIC_START
+        sta dst_ptr+1
+@not_first:
 
         ; Check for end marker (offset == total && no more data)
         lda pkt_data_pos
@@ -1815,7 +1878,11 @@ handle_code_chunk:
         rts
 
 @check_end:
-        ; End of code transfer
+        ; DEBUG: Show end marker detected
+        lda #'E'
+        jsr print_a
+        ; End of code transfer - inject program into BASIC
+        jsr inject_program
         lda #1
         sta got_code
         lda #STATE_DONE
@@ -1862,9 +1929,34 @@ handle_error_msg:
         rts
 
 ;-------------------------------------------------------------------------------
-; Send ACK packet
+; Send pending ACKs (called after recv_callback returns)
 ;-------------------------------------------------------------------------------
-send_ack:
+send_pending_acks:
+        lda pending_ack_count
+        beq @done            ; No ACKs pending
+
+        ldx #0
+@loop:
+        cpx pending_ack_count
+        bcs @clear
+
+        lda pending_acks,x
+        jsr send_ack_for_seq
+        inx
+        jmp @loop
+
+@clear:
+        lda #0
+        sta pending_ack_count
+@done:
+        rts
+
+;-------------------------------------------------------------------------------
+; Send ACK for sequence number in A
+;-------------------------------------------------------------------------------
+send_ack_for_seq:
+        sta ack_seq_temp     ; Save seq to ACK
+
         lda #A2P_MAGIC_0
         sta send_buffer
         lda #A2P_MAGIC_1
@@ -1875,9 +1967,9 @@ send_ack:
         sta send_buffer+3
         lda #0
         sta send_buffer+4
-        lda #0               ; Seq for ACK
+        lda #0               ; Seq for ACK packet
         sta send_buffer+5
-        lda pkt_seq          ; ACK this seq
+        lda ack_seq_temp     ; ACK this seq
         sta send_buffer+6
 
         ; Checksum
@@ -1885,7 +1977,7 @@ send_ack:
         eor #1
         eor #0
         eor #0
-        eor pkt_seq
+        eor ack_seq_temp
         sta send_buffer+7
 
         lda #8
@@ -1895,6 +1987,13 @@ send_ack:
         ldax #send_buffer
         jsr tcp_send
         rts
+
+;-------------------------------------------------------------------------------
+; Send ACK packet (legacy - uses pkt_seq)
+;-------------------------------------------------------------------------------
+send_ack:
+        lda pkt_seq
+        jmp send_ack_for_seq
 
 ;-------------------------------------------------------------------------------
 ; Send NACK packet
@@ -1934,12 +2033,29 @@ send_nack:
 ; Output character with scrolling
 ;-------------------------------------------------------------------------------
 output_char:
-        ; Check for newline
-        cmp #$8D             ; CR
+        ; Check for newline (CR or LF)
+        cmp #$8D             ; CR with high bit
         beq @newline
-        cmp #$0D
+        cmp #$0D             ; CR without high bit
+        beq @newline
+        cmp #$8A             ; LF with high bit
+        beq @newline
+        cmp #$0A             ; LF without high bit
         beq @newline
 
+        ; Save character and Y register
+        pha
+        tya
+        pha
+
+        ; Ensure we're on the output row
+        ldy output_row
+        cpy CV               ; Already on correct row?
+        beq @check_wrap
+        sty CV
+        jsr VTAB             ; Position to output_row
+
+@check_wrap:
         ; Check line wrap
         lda CH
         cmp #39              ; At end of line?
@@ -1949,6 +2065,9 @@ output_char:
         sta CH
 
 @print:
+        pla                  ; Restore Y
+        tay
+        pla                  ; Restore character
         jsr COUT
         rts
 
@@ -2469,6 +2588,11 @@ send_buffer:    .res 256
 parse_value:    .res 1
 port_lo:        .res 1
 port_hi:        .res 1
+
+; Deferred ACK handling (avoid tcp_send during recv_callback)
+pending_ack_count: .res 1       ; Number of pending ACKs
+pending_acks:      .res 8       ; Sequence numbers to ACK
+ack_seq_temp:      .res 1       ; Temp for send_ack_for_seq
 
 ; ProDOS I/O buffer (must be page-aligned, 1024 bytes)
 ; Placed in separate IOBUF segment to ensure alignment

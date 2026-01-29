@@ -1,6 +1,8 @@
 """Bobbin emulator process manager.
 
 Uses pexpect to control the Bobbin Apple II emulator interactively.
+Now with optional Unix socket control channel for reliable AI/MCP integration.
+
 Provides methods for:
 - Starting/stopping the emulator
 - Sending keystrokes
@@ -18,11 +20,16 @@ from pathlib import Path
 from typing import Optional
 
 import pexpect
+from pexpect import popen_spawn
 
 from .screen import decode_screen, SCREEN_LINE_ADDRESSES, SCREEN_WIDTH, SCREEN_HEIGHT
+from .control_socket import BobbinControlSocket, ControlSocketError
 
 # Path where Bobbin writes screen dump on SIGUSR1
 SIGUSR1_SCREEN_PATH = "/tmp/bobbin_screen.txt"
+
+# Default control socket path
+DEFAULT_CONTROL_SOCKET = "/tmp/bobbin.sock"
 
 
 class BobbinError(Exception):
@@ -40,16 +47,20 @@ class Emulator:
     # Default Bobbin path (can be overridden)
     DEFAULT_BOBBIN_PATH = None
 
-    def __init__(self, bobbin_path: Optional[str] = None):
+    def __init__(self, bobbin_path: Optional[str] = None,
+                 control_socket: Optional[str] = DEFAULT_CONTROL_SOCKET):
         """Initialize emulator manager.
 
         Args:
             bobbin_path: Path to bobbin executable. If None, searches common locations.
+            control_socket: Path to control socket. Set to None to disable.
         """
         self.bobbin_path = bobbin_path or self._find_bobbin()
         self.process: Optional[pexpect.spawn] = None
         self.in_debugger = False
         self.machine_type = "enhanced"
+        self.control_socket_path = control_socket
+        self.control_socket: Optional[BobbinControlSocket] = None
 
     def _find_bobbin(self) -> str:
         """Find the bobbin executable."""
@@ -98,7 +109,8 @@ class Emulator:
         self.machine_type = machine
 
         # Build command
-        cmd = [self.bobbin_path, "--simple", "-m", machine]
+        # --remain keeps bobbin running even if stdin gets EOF
+        cmd = [self.bobbin_path, "--simple", "--remain", "-m", machine]
         if disk:
             cmd.extend(["--disk", disk])
         if uthernet2:
@@ -106,13 +118,19 @@ class Emulator:
         if mouse:
             cmd.append("--mouse")
 
-        # Start process
+        # Add control socket if configured
+        if self.control_socket_path:
+            cmd.extend(["--control-socket", self.control_socket_path])
+
+        # Start process with PTY
         self.process = pexpect.spawn(
             cmd[0],
             cmd[1:],
             encoding='latin-1',  # Apple II uses high-bit ASCII
             timeout=timeout,
+            ignore_sighup=True,
         )
+        self.process.setecho(False)
 
         # Wait for the BASIC prompt (] at start of line)
         # Use \n] pattern to match the actual BASIC prompt, not ] in Bobbin banner
@@ -129,15 +147,42 @@ class Emulator:
                 data = self.process.read_nonblocking(4096, timeout=0.05)
                 if not data:
                     break
-            except (pexpect.TIMEOUT, pexpect.EOF):
+            except pexpect.TIMEOUT:
+                break
+            except pexpect.EOF:
+                # Check if process is actually dead
+                if not self.process.isalive():
+                    raise BobbinError("Emulator process died during boot")
                 break
             time.sleep(0.02)
 
         self.in_debugger = False
+
+        # Connect to control socket if configured
+        if self.control_socket_path:
+            time.sleep(0.3)  # Give socket time to initialize
+            self.control_socket = BobbinControlSocket(self.control_socket_path)
+            if self.control_socket.connect(timeout=2.0):
+                try:
+                    self.control_socket.ping()
+                except ControlSocketError:
+                    self.control_socket = None
+            else:
+                self.control_socket = None
+
         return self.process.before + "]"
 
     def shutdown(self):
         """Stop the emulator."""
+        # Disconnect control socket first
+        if self.control_socket:
+            try:
+                self.control_socket.quit()
+            except Exception:
+                pass
+            self.control_socket.disconnect()
+            self.control_socket = None
+
         if self.process:
             try:
                 # Try graceful exit via debugger
@@ -193,17 +238,23 @@ class Emulator:
                     data = self.process.read_nonblocking(4096, timeout=0.02)
                     if not data:
                         break
-                except (pexpect.TIMEOUT, pexpect.EOF):
+                except pexpect.TIMEOUT:
+                    break
+                except pexpect.EOF:
+                    # Check if process is actually dead
+                    if not self.process.isalive():
+                        raise BobbinError("Emulator process died unexpectedly")
                     break
             time.sleep(0.05)
 
-            # Send SIGQUIT (Ctrl-\) to enter debugger
-            # Using SIGQUIT instead of SIGINT avoids leaking Ctrl-C to Apple II
-            import signal
-            self.process.kill(signal.SIGQUIT)
+            # Send Ctrl-C twice via stdin to enter debugger
+            # Bobbin explicitly says "Ctrl-C *TWICE* to enter debugger"
+            self.process.sendcontrol('c')
+            time.sleep(0.15)
+            self.process.sendcontrol('c')
 
-            # Small delay to let the signals be processed
-            time.sleep(0.1)
+            # Small delay to let the debugger activate
+            time.sleep(0.3)
 
             # Wait for debugger prompt - try multiple patterns
             # Bobbin uses "BOBBIN> " as its prompt
@@ -217,7 +268,11 @@ class Emulator:
                 for _ in range(3):
                     try:
                         self.process.read_nonblocking(4096, timeout=0.02)
-                    except (pexpect.TIMEOUT, pexpect.EOF):
+                    except pexpect.TIMEOUT:
+                        break
+                    except pexpect.EOF:
+                        if not self.process.isalive():
+                            raise BobbinError("Emulator died in debugger")
                         break
 
                 return True
@@ -259,7 +314,11 @@ class Emulator:
         for _ in range(5):
             try:
                 self.process.read_nonblocking(4096, timeout=0.05)
-            except (pexpect.TIMEOUT, pexpect.EOF):
+            except pexpect.TIMEOUT:
+                break
+            except pexpect.EOF:
+                if not self.process.isalive():
+                    raise BobbinError("Emulator died exiting debugger")
                 break
 
         self.in_debugger = False
@@ -332,6 +391,14 @@ class Emulator:
         Returns:
             List of byte values
         """
+        # Use control socket if available (much more reliable)
+        if self.control_socket:
+            try:
+                return self.control_socket.peek(address, count)
+            except ControlSocketError as e:
+                raise BobbinError(f"Control socket error: {e}")
+
+        # Fall back to debugger method
         # Use longer timeout for large reads (1 second per 256 bytes, minimum 3 seconds)
         read_timeout = max(3.0, count / 256)
 
@@ -376,6 +443,15 @@ class Emulator:
         elif isinstance(data, bytes):
             data = list(data)
 
+        # Use control socket if available (much more reliable)
+        if self.control_socket:
+            try:
+                self.control_socket.poke(address, data)
+                return True
+            except ControlSocketError as e:
+                raise BobbinError(f"Control socket error: {e}")
+
+        # Fall back to debugger method
         # Build command: "addr: val val val..."
         hex_values = ' '.join(f"{b:02X}" for b in data)
         cmd = f"{address:04X}: {hex_values}"
@@ -419,6 +495,14 @@ class Emulator:
         Returns:
             List of 24 strings, each 40 characters
         """
+        # Use control socket if available (much more reliable)
+        if self.control_socket:
+            try:
+                return self.control_socket.read_screen()
+            except ControlSocketError as e:
+                raise BobbinError(f"Control socket error: {e}")
+
+        # Fall back to debugger method
         memory = self.read_screen_memory()
         return decode_screen(memory)
 
@@ -490,13 +574,23 @@ class Emulator:
 
         # Apple II is uppercase
         text = text.upper()
+        if include_return:
+            text += '\r'
 
+        # Use control socket if available (much more reliable)
+        if self.control_socket:
+            try:
+                self.control_socket.inject_keys(text)
+                return
+            except ControlSocketError as e:
+                raise BobbinError(f"Control socket error: {e}")
+
+        # Fall back to debugger method
         # Escape special characters for the keys command
         # Backslashes and quotes need escaping for Bobbin's command parser
         escaped = text.replace('\\', '\\\\')
         escaped = escaped.replace('"', '\\"')
-        if include_return:
-            escaped += '\\r'
+        escaped = escaped.replace('\r', '\\r')
 
         # Enter debugger for key injection
         if not self.enter_debugger():
@@ -525,7 +619,11 @@ class Emulator:
         for _ in range(5):
             try:
                 self.process.read_nonblocking(4096, timeout=0.03)
-            except (pexpect.TIMEOUT, pexpect.EOF):
+            except pexpect.TIMEOUT:
+                break
+            except pexpect.EOF:
+                if not self.process.isalive():
+                    raise BobbinError("Emulator died after key injection")
                 break
 
     def type_text(self, text: str, delay: float = 0.02,
@@ -555,7 +653,11 @@ class Emulator:
         for _ in range(5):
             try:
                 self.process.read_nonblocking(4096, timeout=0.02)
-            except (pexpect.TIMEOUT, pexpect.EOF):
+            except pexpect.TIMEOUT:
+                break
+            except pexpect.EOF:
+                if not self.process.isalive():
+                    raise BobbinError("Emulator died before typing")
                 break
 
         # Small delay to ensure emulator is ready
