@@ -507,11 +507,10 @@ class Emulator:
         return decode_screen(memory)
 
     def read_screen_nonblocking(self, timeout: float = 1.0) -> list[str]:
-        """Read the screen without stopping emulation using SIGUSR1.
+        """Read the screen without stopping emulation.
 
-        This method sends SIGUSR1 to Bobbin, which triggers a non-blocking
-        screen dump to /tmp/bobbin_screen.txt. This is ideal for capturing
-        screen state during network operations without disrupting TCP state.
+        Uses control socket if available (preferred), otherwise falls back
+        to SIGUSR1-based capture.
 
         Args:
             timeout: Maximum time to wait for screen file to appear
@@ -522,6 +521,14 @@ class Emulator:
         if not self.is_running:
             raise BobbinError("Emulator not running")
 
+        # Use control socket if available (much more reliable)
+        if self.control_socket:
+            try:
+                return self.control_socket.read_screen()
+            except ControlSocketError as e:
+                raise BobbinError(f"Control socket error: {e}")
+
+        # Fall back to SIGUSR1 method
         # Remove old screen file if it exists
         try:
             os.unlink(SIGUSR1_SCREEN_PATH)
@@ -699,6 +706,30 @@ class Emulator:
         Returns:
             Dict with A, X, Y, SP, PC, and flags
         """
+        # Use control socket if available (much more reliable)
+        if self.control_socket:
+            try:
+                cpu = self.control_socket.get_cpu_state()
+                # Map control socket format to our format
+                p = cpu.get('p', 0)
+                return {
+                    'A': cpu.get('a', 0),
+                    'X': cpu.get('x', 0),
+                    'Y': cpu.get('y', 0),
+                    'SP': cpu.get('sp', 0),
+                    'PC': cpu.get('pc', 0),
+                    'N': bool(p & 0x80),
+                    'V': bool(p & 0x40),
+                    'B': bool(p & 0x10),
+                    'D': bool(p & 0x08),
+                    'I': bool(p & 0x04),
+                    'Z': bool(p & 0x02),
+                    'C': bool(p & 0x01),
+                }
+            except ControlSocketError as e:
+                raise BobbinError(f"Control socket error: {e}")
+
+        # Fall back to debugger method
         if not self.in_debugger:
             self.enter_debugger()
 
@@ -747,6 +778,15 @@ class Emulator:
         Args:
             cold: If True, do a cold reset (full reboot). Otherwise warm reset.
         """
+        # Use control socket if available (much more reliable)
+        if self.control_socket:
+            try:
+                self.control_socket.reset(cold=cold)
+                return
+            except ControlSocketError as e:
+                raise BobbinError(f"Control socket error: {e}")
+
+        # Fall back to debugger method
         if not self.in_debugger:
             self.enter_debugger()
 
@@ -830,6 +870,16 @@ class Emulator:
         if not self.is_running:
             raise BobbinError("Emulator not running")
 
+        # Use control socket if available (much more reliable)
+        # Note: control socket only supports PPM format
+        if self.control_socket and format == "ppm":
+            try:
+                result = self.control_socket.capture_hgr(filepath, page=page, color=color)
+                return 'path' in result
+            except ControlSocketError as e:
+                raise BobbinError(f"Control socket error: {e}")
+
+        # Fall back to debugger method
         was_in_debugger = self.in_debugger
         if not was_in_debugger:
             self.enter_debugger()
@@ -865,6 +915,16 @@ class Emulator:
         if not self.is_running:
             raise BobbinError("Emulator not running")
 
+        # Use control socket if available (much more reliable)
+        # Note: control socket only supports PPM format (scaled, not native)
+        if self.control_socket and format == "ppm" and not native:
+            try:
+                result = self.control_socket.capture_gr(filepath, page=page)
+                return 'path' in result
+            except ControlSocketError as e:
+                raise BobbinError(f"Control socket error: {e}")
+
+        # Fall back to debugger method
         was_in_debugger = self.in_debugger
         if not was_in_debugger:
             self.enter_debugger()
@@ -902,6 +962,16 @@ class Emulator:
         if not self.is_running:
             raise BobbinError("Emulator not running")
 
+        # Use control socket if available (much more reliable)
+        # Note: control socket only supports PPM format
+        if self.control_socket and format == "ppm":
+            try:
+                result = self.control_socket.capture_dhgr(filepath, page=page)
+                return 'path' in result
+            except ControlSocketError as e:
+                raise BobbinError(f"Control socket error: {e}")
+
+        # Fall back to debugger method
         was_in_debugger = self.in_debugger
         if not was_in_debugger:
             self.enter_debugger()
@@ -938,6 +1008,16 @@ class Emulator:
         if not self.is_running:
             raise BobbinError("Emulator not running")
 
+        # Use control socket if available (much more reliable)
+        # Note: control socket only supports PPM format (scaled, not native)
+        if self.control_socket and format == "ppm" and not native:
+            try:
+                result = self.control_socket.capture_dgr(filepath, page=page)
+                return 'path' in result
+            except ControlSocketError as e:
+                raise BobbinError(f"Control socket error: {e}")
+
+        # Fall back to debugger method
         was_in_debugger = self.in_debugger
         if not was_in_debugger:
             self.enter_debugger()

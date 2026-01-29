@@ -1435,38 +1435,31 @@ async def _call_tool_impl(name: str, args: dict[str, Any]) -> str:
         # Calculate end address
         end_addr = load_addr + len(data)
 
-        # Enter debugger once for all memory writes
-        emu.enter_debugger()
+        # Write the tokenized BASIC to memory using poke (uses control socket if available)
+        emu.poke(load_addr, list(data))
 
-        # Write the tokenized BASIC to memory using direct debugger commands
-        # This avoids the overhead of multiple enter/exit cycles
-        hex_values = ' '.join(f"{b:02X}" for b in data)
-        emu.debugger_command(f"{load_addr:04X}: {hex_values}", stay_in_debugger=True)
-
-        # Update BASIC pointers - all in one debugger session
+        # Update BASIC pointers using poke
         # TXTTAB ($67-68) = start of program
-        emu.debugger_command(f"0067: {load_addr & 0xFF:02X} {(load_addr >> 8) & 0xFF:02X}", stay_in_debugger=True)
+        emu.poke(0x67, [load_addr & 0xFF, (load_addr >> 8) & 0xFF])
 
         # VARTAB, ARYTAB, STREND ($69-6E) = end of program
-        emu.debugger_command(f"0069: {end_addr & 0xFF:02X} {(end_addr >> 8) & 0xFF:02X}", stay_in_debugger=True)
-        emu.debugger_command(f"006B: {end_addr & 0xFF:02X} {(end_addr >> 8) & 0xFF:02X}", stay_in_debugger=True)
-        emu.debugger_command(f"006D: {end_addr & 0xFF:02X} {(end_addr >> 8) & 0xFF:02X}", stay_in_debugger=True)
+        emu.poke(0x69, [end_addr & 0xFF, (end_addr >> 8) & 0xFF])
+        emu.poke(0x6B, [end_addr & 0xFF, (end_addr >> 8) & 0xFF])
+        emu.poke(0x6D, [end_addr & 0xFF, (end_addr >> 8) & 0xFF])
 
         # PRGEND ($AF-B0) = end of program
-        emu.debugger_command(f"00AF: {end_addr & 0xFF:02X} {(end_addr >> 8) & 0xFF:02X}", stay_in_debugger=True)
-
-        # Exit debugger once at the end
-        emu.exit_debugger()
-
-        # Do a dummy read_screen cycle to ensure emulator state is clean
-        # This seems to be necessary to fix stdin handling after debugger operations
-        emu.read_screen()
+        emu.poke(0xAF, [end_addr & 0xFF, (end_addr >> 8) & 0xFF])
 
         result = f"Injected {len(data)} bytes at ${load_addr:04X}\n"
         result += f"Updated pointers: TXTTAB=${load_addr:04X}, VARTAB=${end_addr:04X}"
 
         if auto_run:
-            output = emu.run_basic_command("RUN")
+            # Type RUN and wait for output
+            emu.type_text("RUN", include_return=True)
+            import time
+            time.sleep(0.5)
+            lines = emu.read_screen()
+            output = '\n'.join(line.rstrip() for line in lines).strip()
             result += f"\n\nRUN output:\n{output}"
 
         return result
