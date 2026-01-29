@@ -494,13 +494,14 @@ class AppleIISession:
             self._send_response(
                 "/HELP - SHOW COMMANDS\n"
                 "/AGENT - TOGGLE CLAUDE CODE MODE\n"
-                "/SUSPEND - DROP TO BASIC (RUN YOUR PROGRAM)\n"
+                "/MODEL S|O|H - SET MODEL\n"
+                "/SUSPEND - DROP TO BASIC\n"
                 "/CODE <DESC> - GENERATE BASIC\n"
                 "/CHAT <MSG> - CHAT WITH CLAUDE\n"
                 "/TURNS <N> - SET MAX AGENT TURNS\n"
-                "/HISTORY - TOGGLE CONVERSATION MEMORY\n"
+                "/HISTORY - TOGGLE MEMORY\n"
                 "/CLEAR - CLEAR CONVERSATION\n"
-                "/PROMPT <TEXT> - SET SYSTEM PROMPT\n"
+                "/PROMPT <TEXT> - SET PROMPT\n"
                 "/IP - SHOW CONNECTION INFO"
             )
         elif command == 'SUSPEND':
@@ -549,6 +550,23 @@ class AppleIISession:
                 print("[Session] Custom prompt cleared")
         elif command == 'IP':
             self._send_response(f"CONNECTED FROM {self.addr[0]}")
+        elif command == 'MODEL':
+            if len(parts) > 1:
+                m = parts[1].upper()
+                if m in ('S', 'SONNET'):
+                    self.model = MODEL_SONNET
+                    self._send_response("MODEL: SONNET")
+                elif m in ('O', 'OPUS'):
+                    self.model = MODEL_OPUS
+                    self._send_response("MODEL: OPUS")
+                elif m in ('H', 'HAIKU'):
+                    self.model = MODEL_HAIKU
+                    self._send_response("MODEL: HAIKU")
+                else:
+                    self._send_response("USAGE: /MODEL S|O|H\n(SONNET/OPUS/HAIKU)")
+            else:
+                model_name = MODEL_NAMES.get(self.model, "SONNET")
+                self._send_response(f"MODEL: {model_name.upper()}\nUSE /MODEL S|O|H TO CHANGE")
         else:
             self._send_response(f"UNKNOWN: {command}\nTYPE /HELP")
 
@@ -688,6 +706,10 @@ class AppleIISession:
         model_id = MODEL_IDS.get(self.model, MODEL_IDS[MODEL_SONNET])
 
         try:
+            # Prepend custom prompt/context if set
+            if self.custom_prompt:
+                message = f"[CONTEXT: {self.custom_prompt}]\n\n{message}"
+
             # Run the agentic loop
             response = self.agentic_claude.run_agentic(
                 message,
