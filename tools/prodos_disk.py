@@ -345,6 +345,67 @@ class ProDOSDisk:
         print(f"  Added successfully to block {key_block}")
         return True
 
+    def extract_file(self, prodos_name, local_path):
+        """Extract a file from the disk image."""
+        if not self.data:
+            self.load()
+
+        prodos_name = prodos_name.upper()
+
+        # Find the file in directory
+        for dir_block in range(2, 6):
+            block_data = self._get_block(dir_block)
+            offset = 4 + (0x27 if dir_block == 2 else 0)
+
+            while offset + 0x27 <= BLOCK_SIZE:
+                storage_type = block_data[offset] >> 4
+                if storage_type > 0 and storage_type < 0x0F:
+                    name_len = block_data[offset] & 0x0F
+                    name = bytes(block_data[offset + 1:offset + 1 + name_len]).decode('ascii')
+
+                    if name == prodos_name:
+                        key_block = struct.unpack('<H', block_data[offset + 0x11:offset + 0x13])[0]
+                        file_size = struct.unpack('<I', block_data[offset + 0x15:offset + 0x18] + b'\x00')[0]
+                        file_type = block_data[offset + 0x10]
+                        aux_type = struct.unpack('<H', block_data[offset + 0x1F:offset + 0x21])[0]
+
+                        print(f"Extracting: {name}")
+                        print(f"  Size: {file_size} bytes")
+                        print(f"  Type: ${file_type:02X}, Aux: ${aux_type:04X}")
+
+                        # Read file data based on storage type
+                        if storage_type == 0x01:  # Seedling
+                            file_data = self._get_block(key_block)[:file_size]
+                        elif storage_type == 0x02:  # Sapling
+                            index_data = self._get_block(key_block)
+                            file_data = bytearray()
+                            remaining = file_size
+                            i = 0
+                            while remaining > 0:
+                                data_block = index_data[i] | (index_data[256 + i] << 8)
+                                chunk_size = min(BLOCK_SIZE, remaining)
+                                file_data.extend(self._get_block(data_block)[:chunk_size])
+                                remaining -= chunk_size
+                                i += 1
+                        elif storage_type == 0x03:  # Tree
+                            print("  Error: Tree files not supported yet")
+                            return False, None, None
+                        else:
+                            print(f"  Error: Unknown storage type {storage_type}")
+                            return False, None, None
+
+                        # Write to local file
+                        with open(local_path, 'wb') as f:
+                            f.write(file_data)
+
+                        print(f"  Saved to: {local_path}")
+                        return True, file_type, aux_type
+
+                offset += 0x27
+
+        print(f"File not found: {prodos_name}")
+        return False, None, None
+
     def catalog(self):
         """List files on the disk."""
         if not self.data:
@@ -397,6 +458,8 @@ def main():
         print("Usage:")
         print("  prodos_disk.py create <image.po> <volume_name> [blocks]")
         print("  prodos_disk.py add <image.po> <local_file> <prodos_name> [type] [aux]")
+        print("  prodos_disk.py extract <image.po> <prodos_name> <local_file>")
+        print("  prodos_disk.py copyboot <src.po> <dest.po>")
         print("  prodos_disk.py catalog <image.po>")
         print()
         print("File types: BIN=06 SYS=FF TXT=04 BAS=FC")
@@ -426,6 +489,37 @@ def main():
 
         disk = ProDOSDisk(image)
         disk.add_file(local_file, prodos_name, file_type, aux_type)
+
+    elif cmd == 'extract':
+        if len(sys.argv) < 5:
+            print("Usage: prodos_disk.py extract <image.po> <prodos_name> <local_file>")
+            sys.exit(1)
+        image = sys.argv[2]
+        prodos_name = sys.argv[3]
+        local_file = sys.argv[4]
+        disk = ProDOSDisk(image)
+        disk.extract_file(prodos_name, local_file)
+
+    elif cmd == 'copyboot':
+        if len(sys.argv) < 4:
+            print("Usage: prodos_disk.py copyboot <src.po> <dest.po>")
+            sys.exit(1)
+        src_image = sys.argv[2]
+        dest_image = sys.argv[3]
+
+        # Copy boot blocks (0 and 1) from source to dest
+        with open(src_image, 'rb') as f:
+            src_data = f.read()
+        with open(dest_image, 'rb') as f:
+            dest_data = bytearray(f.read())
+
+        # Copy blocks 0 and 1 (boot blocks)
+        dest_data[0:1024] = src_data[0:1024]
+
+        with open(dest_image, 'wb') as f:
+            f.write(dest_data)
+
+        print(f"Copied boot blocks from {src_image} to {dest_image}")
 
     elif cmd == 'catalog' or cmd == 'cat':
         if len(sys.argv) < 3:
