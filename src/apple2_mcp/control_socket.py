@@ -1,13 +1,17 @@
-"""Bobbin Control Socket client.
+"""Bobbin control socket client.
 
-Provides a direct control channel to Bobbin emulator via Unix socket,
-bypassing the fragile pexpect/PTY/signal mechanism.
+Provides a Python interface to Bobbin's Unix socket control protocol.
+This allows reliable AI/MCP integration without pexpect/PTY issues.
+
+Protocol: JSON commands over Unix socket, newline-delimited responses.
 """
 
 import json
 import socket
-import os
-from typing import Optional
+import time
+from typing import Optional, Any
+
+DEFAULT_SOCKET_PATH = "/tmp/bobbin.sock"
 
 
 class ControlSocketError(Exception):
@@ -18,19 +22,17 @@ class ControlSocketError(Exception):
 class BobbinControlSocket:
     """Client for Bobbin's Unix socket control interface."""
 
-    DEFAULT_SOCKET_PATH = "/tmp/bobbin.sock"
-
     def __init__(self, socket_path: str = DEFAULT_SOCKET_PATH):
-        """Initialize control socket client.
+        """Initialize the control socket client.
 
         Args:
-            socket_path: Path to Bobbin's control socket
+            socket_path: Path to the Unix socket
         """
         self.socket_path = socket_path
         self.sock: Optional[socket.socket] = None
 
     def connect(self, timeout: float = 5.0) -> bool:
-        """Connect to the control socket.
+        """Connect to the Bobbin control socket.
 
         Args:
             timeout: Connection timeout in seconds
@@ -38,38 +40,35 @@ class BobbinControlSocket:
         Returns:
             True if connected successfully
         """
-        if self.sock is not None:
-            return True
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                self.sock.settimeout(timeout)
+                self.sock.connect(self.socket_path)
+                return True
+            except (socket.error, FileNotFoundError):
+                if self.sock:
+                    self.sock.close()
+                    self.sock = None
+                time.sleep(0.1)
+        return False
 
-        try:
-            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            self.sock.settimeout(timeout)
-            self.sock.connect(self.socket_path)
-            return True
-        except (socket.error, OSError) as e:
-            self.sock = None
-            return False
-
-    def disconnect(self) -> None:
+    def disconnect(self):
         """Disconnect from the control socket."""
-        if self.sock is not None:
+        if self.sock:
             try:
                 self.sock.close()
             except Exception:
                 pass
             self.sock = None
 
-    @property
-    def is_connected(self) -> bool:
-        """Check if connected to the socket."""
-        return self.sock is not None
-
     def send_command(self, cmd: dict, timeout: float = 5.0) -> dict:
-        """Send a command and receive response.
+        """Send a command and receive the response.
 
         Args:
-            cmd: Command dictionary
-            timeout: Response timeout in seconds
+            cmd: Command dictionary (must have "cmd" key)
+            timeout: Response timeout
 
         Returns:
             Response dictionary
@@ -77,16 +76,16 @@ class BobbinControlSocket:
         Raises:
             ControlSocketError: On communication error
         """
-        if self.sock is None:
+        if not self.sock:
             raise ControlSocketError("Not connected")
 
         try:
-            # Send command as JSON + newline
-            cmd_json = json.dumps(cmd) + "\n"
-            self.sock.settimeout(timeout)
-            self.sock.sendall(cmd_json.encode('utf-8'))
+            # Send command
+            cmd_str = json.dumps(cmd) + "\n"
+            self.sock.sendall(cmd_str.encode())
 
-            # Receive response (newline-delimited)
+            # Receive response (read until newline)
+            self.sock.settimeout(timeout)
             response = b""
             while True:
                 chunk = self.sock.recv(65536)
@@ -96,30 +95,47 @@ class BobbinControlSocket:
                 if b"\n" in response:
                     break
 
-            # Parse JSON response
-            response_str = response.decode('utf-8').strip()
-            return json.loads(response_str)
+            # Parse response
+            response_str = response.decode().strip()
+            result = json.loads(response_str)
 
-        except socket.timeout:
-            raise ControlSocketError("Timeout waiting for response")
+            if "error" in result:
+                raise ControlSocketError(result["error"])
+
+            return result
+
         except json.JSONDecodeError as e:
             raise ControlSocketError(f"Invalid JSON response: {e}")
-        except (socket.error, OSError) as e:
-            self.disconnect()
+        except socket.timeout:
+            raise ControlSocketError("Response timeout")
+        except socket.error as e:
             raise ControlSocketError(f"Socket error: {e}")
 
-    # High-level convenience methods
+    # =========================================================================
+    # Basic Commands
+    # =========================================================================
 
     def ping(self) -> dict:
-        """Ping the emulator.
+        """Ping the emulator to check connection.
 
         Returns:
-            Dict with version and machine info
+            Dict with version, machine type, and paused state
         """
         return self.send_command({"cmd": "ping"})
 
+    def quit(self):
+        """Quit the emulator."""
+        try:
+            self.send_command({"cmd": "quit"})
+        except ControlSocketError:
+            pass  # Connection will close
+
+    # =========================================================================
+    # Memory Commands
+    # =========================================================================
+
     def peek(self, addr: int, length: int = 1) -> list[int]:
-        """Read memory.
+        """Read bytes from memory.
 
         Args:
             addr: Starting address (0-65535)
@@ -128,13 +144,11 @@ class BobbinControlSocket:
         Returns:
             List of byte values
         """
-        resp = self.send_command({"cmd": "peek", "addr": addr, "len": length})
-        if "error" in resp:
-            raise ControlSocketError(resp["error"])
-        return resp.get("data", [])
+        result = self.send_command({"cmd": "peek", "addr": addr, "len": length})
+        return result.get("data", [])
 
     def poke(self, addr: int, data: list[int]) -> int:
-        """Write memory.
+        """Write bytes to memory.
 
         Args:
             addr: Starting address
@@ -143,37 +157,34 @@ class BobbinControlSocket:
         Returns:
             Number of bytes written
         """
-        resp = self.send_command({"cmd": "poke", "addr": addr, "data": data})
-        if "error" in resp:
-            raise ControlSocketError(resp["error"])
-        return resp.get("count", 0)
+        result = self.send_command({"cmd": "poke", "addr": addr, "data": data})
+        return result.get("count", 0)
 
-    def load(self, addr: int, data: bytes) -> int:
-        """Load binary data into memory.
+    def load(self, addr: int, hex_data: str) -> int:
+        """Load hex data into memory.
 
         Args:
             addr: Starting address
-            data: Binary data to load
+            hex_data: Hex string (e.g., "A9008D0008")
 
         Returns:
             Number of bytes loaded
         """
-        hex_data = data.hex()
-        resp = self.send_command({"cmd": "load", "addr": addr, "hex": hex_data})
-        if "error" in resp:
-            raise ControlSocketError(resp["error"])
-        return resp.get("len", 0)
+        result = self.send_command({"cmd": "load", "addr": addr, "hex": hex_data})
+        return result.get("len", 0)
+
+    # =========================================================================
+    # Display Commands
+    # =========================================================================
 
     def read_screen(self) -> list[str]:
-        """Read text screen as list of strings.
+        """Read the text screen as decoded ASCII lines.
 
         Returns:
             List of 24 strings, each 40 characters
         """
-        resp = self.send_command({"cmd": "screen"})
-        if "error" in resp:
-            raise ControlSocketError(resp["error"])
-        return resp.get("lines", [])
+        result = self.send_command({"cmd": "screen"})
+        return result.get("lines", [])
 
     def read_screen_raw(self) -> list[int]:
         """Read raw screen memory ($0400-$07FF).
@@ -181,145 +192,344 @@ class BobbinControlSocket:
         Returns:
             List of 1024 byte values
         """
-        resp = self.send_command({"cmd": "screen_raw"})
-        if "error" in resp:
-            raise ControlSocketError(resp["error"])
-        return resp.get("data", [])
+        result = self.send_command({"cmd": "screen_raw"})
+        return result.get("data", [])
+
+    # =========================================================================
+    # Input Commands
+    # =========================================================================
 
     def inject_keys(self, text: str) -> int:
-        """Inject keystrokes into keyboard buffer.
+        """Inject keystrokes into the keyboard buffer.
 
         Args:
-            text: Text to inject (will be uppercased by Apple II)
+            text: Text to inject (will be processed by Apple II)
 
         Returns:
             Number of characters injected
         """
-        resp = self.send_command({"cmd": "keys", "text": text})
-        if "error" in resp:
-            raise ControlSocketError(resp["error"])
-        return resp.get("injected", 0)
+        result = self.send_command({"cmd": "keys", "text": text})
+        return result.get("injected", 0)
+
+    # =========================================================================
+    # CPU Commands
+    # =========================================================================
 
     def get_cpu_state(self) -> dict:
         """Get CPU register state.
 
         Returns:
-            Dict with pc, a, x, y, sp, p (flags)
+            Dict with pc, a, x, y, sp, p, cycles, instructions, frames
         """
-        resp = self.send_command({"cmd": "cpu"})
-        if "error" in resp:
-            raise ControlSocketError(resp["error"])
-        return {
-            "pc": resp.get("pc", 0),
-            "a": resp.get("a", 0),
-            "x": resp.get("x", 0),
-            "y": resp.get("y", 0),
-            "sp": resp.get("sp", 0),
-            "p": resp.get("p", 0),
-        }
+        return self.send_command({"cmd": "cpu"})
 
-    def reset(self, cold: bool = False) -> bool:
+    def reset(self, cold: bool = False):
         """Reset the CPU.
 
         Args:
             cold: If True, do a cold reset (full reboot)
+        """
+        self.send_command({"cmd": "reset", "cold": cold})
+
+    def step(self, count: int = 1) -> dict:
+        """Single-step one or more instructions.
+
+        Args:
+            count: Number of instructions to execute (1-1000)
 
         Returns:
-            True if successful
+            Dict with new CPU state (pc, a, x, y, sp, p)
         """
-        resp = self.send_command({"cmd": "reset", "cold": cold})
-        return resp.get("ok", False)
+        return self.send_command({"cmd": "step", "count": count})
 
-    def pause(self) -> bool:
-        """Pause emulation (enter debugger).
+    def pause(self):
+        """Pause emulation."""
+        self.send_command({"cmd": "pause"})
+
+    def resume(self):
+        """Resume emulation."""
+        self.send_command({"cmd": "resume"})
+
+    def call(self, addr: int) -> dict:
+        """Call a subroutine (JSR equivalent).
+
+        Args:
+            addr: Address to call
 
         Returns:
-            True if successful
+            Dict with new pc and return address
         """
-        resp = self.send_command({"cmd": "pause"})
-        return resp.get("ok", False)
+        return self.send_command({"cmd": "call", "addr": addr})
 
-    def resume(self) -> bool:
-        """Resume emulation (exit debugger).
+    # =========================================================================
+    # Breakpoint Commands
+    # =========================================================================
+
+    def break_set(self, addr: int) -> dict:
+        """Set a breakpoint.
+
+        Args:
+            addr: Address to break at
 
         Returns:
-            True if successful
+            Dict with breakpoint id
         """
-        resp = self.send_command({"cmd": "resume"})
-        return resp.get("ok", False)
+        return self.send_command({"cmd": "break_set", "addr": addr})
+
+    def break_clear(self, id: int = None, addr: int = None):
+        """Clear a breakpoint.
+
+        Args:
+            id: Breakpoint ID to clear
+            addr: Address to clear breakpoint at
+        """
+        cmd = {"cmd": "break_clear"}
+        if id is not None:
+            cmd["id"] = id
+        if addr is not None:
+            cmd["addr"] = addr
+        self.send_command(cmd)
+
+    def break_list(self) -> list[dict]:
+        """List all breakpoints.
+
+        Returns:
+            List of breakpoint dicts with id, addr, enabled, type
+        """
+        result = self.send_command({"cmd": "break_list"})
+        return result.get("breakpoints", [])
+
+    def break_enable(self, id: int):
+        """Enable a breakpoint.
+
+        Args:
+            id: Breakpoint ID to enable
+        """
+        self.send_command({"cmd": "break_enable", "id": id})
+
+    def break_disable(self, id: int):
+        """Disable a breakpoint.
+
+        Args:
+            id: Breakpoint ID to disable
+        """
+        self.send_command({"cmd": "break_disable", "id": id})
+
+    def watch_set(self, addr: int) -> dict:
+        """Set a watchpoint (breaks when memory changes).
+
+        Args:
+            addr: Address to watch
+
+        Returns:
+            Dict with watchpoint id and current value
+        """
+        return self.send_command({"cmd": "watch_set", "addr": addr})
+
+    # =========================================================================
+    # Disk Commands
+    # =========================================================================
 
     def disk_status(self) -> dict:
         """Get disk drive status.
 
         Returns:
-            Dict with active drive number and spinning status
+            Dict with active drive and spinning state
         """
-        resp = self.send_command({"cmd": "disk_status"})
-        if "error" in resp:
-            raise ControlSocketError(resp["error"])
-        return resp
+        return self.send_command({"cmd": "disk_status"})
 
-    def disk_insert(self, drive: int, path: str) -> bool:
+    def disk_insert(self, path: str, drive: int = 1):
         """Insert a disk image.
 
         Args:
-            drive: Drive number (1 or 2)
             path: Path to disk image file
-
-        Returns:
-            True if successful
+            drive: Drive number (1 or 2)
         """
-        resp = self.send_command({"cmd": "disk_insert", "drive": drive, "path": path})
-        return resp.get("ok", False)
+        self.send_command({"cmd": "disk_insert", "path": path, "drive": drive})
 
-    def disk_eject(self, drive: int) -> bool:
+    def disk_eject(self, drive: int = 1):
         """Eject a disk.
 
         Args:
             drive: Drive number (1 or 2)
+        """
+        self.send_command({"cmd": "disk_eject", "drive": drive})
+
+    # =========================================================================
+    # Graphics Commands
+    # =========================================================================
+
+    def capture_hgr(self, path: str, page: int = 1, color: bool = False) -> dict:
+        """Capture HGR graphics to a PPM file.
+
+        Args:
+            path: Output file path
+            page: HGR page (1 or 2)
+            color: Use color mode
 
         Returns:
-            True if successful
+            Dict with path, width, height
         """
-        resp = self.send_command({"cmd": "disk_eject", "drive": drive})
-        return resp.get("ok", False)
+        return self.send_command({"cmd": "hgr", "path": path, "page": page, "color": color})
 
-    def quit(self) -> bool:
-        """Shutdown the emulator.
+    def capture_gr(self, path: str, page: int = 1) -> dict:
+        """Capture GR (lo-res) graphics to a PPM file.
+
+        Args:
+            path: Output file path
+            page: GR page (1 or 2)
 
         Returns:
-            True if successful
+            Dict with path, width, height
         """
-        try:
-            resp = self.send_command({"cmd": "quit"})
-            return resp.get("ok", False)
-        except ControlSocketError:
-            # Connection will close after quit
-            return True
-        finally:
-            self.disconnect()
+        return self.send_command({"cmd": "gr", "path": path, "page": page})
 
+    def capture_dhgr(self, path: str, page: int = 1) -> dict:
+        """Capture DHGR (double hi-res) graphics to a PPM file.
 
-# Convenience function to check if socket is available
-def socket_available(path: str = BobbinControlSocket.DEFAULT_SOCKET_PATH) -> bool:
-    """Check if the control socket exists and is connectable.
+        Args:
+            path: Output file path
+            page: DHGR page (1 or 2)
 
-    Args:
-        path: Socket path to check
+        Returns:
+            Dict with path, width, height
+        """
+        return self.send_command({"cmd": "dhgr", "path": path, "page": page})
 
-    Returns:
-        True if socket is available
-    """
-    if not os.path.exists(path):
-        return False
+    def capture_dgr(self, path: str, page: int = 1) -> dict:
+        """Capture DGR (double lo-res) graphics to a PPM file.
 
-    client = BobbinControlSocket(path)
-    if client.connect(timeout=1.0):
-        try:
-            client.ping()
-            return True
-        except ControlSocketError:
-            pass
-        finally:
-            client.disconnect()
-    return False
+        Args:
+            path: Output file path
+            page: DGR page (1 or 2)
+
+        Returns:
+            Dict with path, width, height
+        """
+        return self.send_command({"cmd": "dgr", "path": path, "page": page})
+
+    # =========================================================================
+    # State Commands
+    # =========================================================================
+
+    def save_state(self, path: str) -> dict:
+        """Save emulator state to a file.
+
+        Args:
+            path: Output file path
+
+        Returns:
+            Dict with path
+        """
+        return self.send_command({"cmd": "save_state", "path": path})
+
+    def load_state(self, path: str) -> dict:
+        """Load emulator state from a file.
+
+        Args:
+            path: Input file path
+
+        Returns:
+            Dict with path
+        """
+        return self.send_command({"cmd": "load_state", "path": path})
+
+    # =========================================================================
+    # Speed and Timing Commands
+    # =========================================================================
+
+    def set_speed(self, turbo: bool) -> dict:
+        """Set emulation speed.
+
+        Args:
+            turbo: True for turbo (unthrottled) mode
+
+        Returns:
+            Dict with current turbo state
+        """
+        return self.send_command({"cmd": "speed", "turbo": turbo})
+
+    def get_cycles(self) -> dict:
+        """Get cycle/instruction/frame counts.
+
+        Returns:
+            Dict with cycles, instructions, frames
+        """
+        return self.send_command({"cmd": "cycles"})
+
+    # =========================================================================
+    # Trace Commands
+    # =========================================================================
+
+    def trace(self, enable: bool) -> dict:
+        """Enable or disable instruction tracing.
+
+        Args:
+            enable: True to enable tracing
+
+        Returns:
+            Dict with tracing state and file path
+        """
+        return self.send_command({"cmd": "trace", "enable": enable})
+
+    # =========================================================================
+    # Mouse Commands
+    # =========================================================================
+
+    def mouse(self, x: int = None, y: int = None, button: bool = None) -> dict:
+        """Control mouse position and button.
+
+        Args:
+            x: X position (0-279 for HGR)
+            y: Y position (0-191 for HGR)
+            button: Button state
+
+        Returns:
+            Dict with current x, y, button, slot
+        """
+        cmd = {"cmd": "mouse"}
+        if x is not None:
+            cmd["x"] = x
+        if y is not None:
+            cmd["y"] = y
+        if button is not None:
+            cmd["button"] = button
+        return self.send_command(cmd)
+
+    # =========================================================================
+    # System Commands
+    # =========================================================================
+
+    def get_slots(self) -> dict:
+        """Get peripheral slot configuration.
+
+        Returns:
+            Dict with slots and their contents
+        """
+        result = self.send_command({"cmd": "slots"})
+        return result.get("slots", {})
+
+    def get_softswitches(self) -> dict:
+        """Get soft switch states.
+
+        Returns:
+            Dict with switch states (text, mixed, page2, hires, etc.)
+        """
+        result = self.send_command({"cmd": "softswitches"})
+        return result.get("switches", {})
+
+    def disasm(self, addr: int = None, count: int = 16) -> list[dict]:
+        """Disassemble memory.
+
+        Args:
+            addr: Starting address (default: current PC)
+            count: Number of instructions (1-64)
+
+        Returns:
+            List of dicts with addr and bytes
+        """
+        cmd = {"cmd": "disasm", "count": count}
+        if addr is not None:
+            cmd["addr"] = addr
+        result = self.send_command(cmd)
+        return result.get("lines", [])

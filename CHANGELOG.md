@@ -8,22 +8,59 @@ All notable changes to the Apple II Agent project.
 
 - **Bobbin Control Socket**: Added Unix domain socket control interface to Bobbin emulator for reliable AI/MCP integration. This completely bypasses the pexpect/PTY/signal issues that caused debugger operations to fail.
 
-  **Socket Protocol** (JSON over `/tmp/bobbin.sock`):
-  - `ping` - Get version and machine type
+  **Socket Protocol v2.0** (JSON over `/tmp/bobbin.sock`):
+
+  *Basic Commands:*
+  - `ping` - Get version, machine type, and paused state
+  - `quit` - Exit emulator
+
+  *Memory Commands:*
   - `peek` - Read memory (addr, len) → returns byte array
   - `poke` - Write memory (addr, data[]) → writes bytes
+  - `load` - Load hex data into memory at address
   - `screen` - Read text screen as 24 decoded ASCII lines
   - `screen_raw` - Read raw screen memory $0400-$07FF
-  - `keys` - Inject keystrokes into keyboard buffer
-  - `cpu` - Get CPU state (PC, A, X, Y, SP, P flags)
-  - `reset` - Reset CPU (optional cold boot)
-  - `pause` - Pause emulation (enter debugger)
+
+  *CPU Commands:*
+  - `cpu` - Get CPU state (PC, A, X, Y, SP, P, cycles, instructions, frames)
+  - `step` - Single-step 1-1000 instructions
+  - `reset` - Reset CPU (warm or cold boot)
+  - `pause` - Pause emulation
   - `resume` - Resume emulation
-  - `load` - Load hex data into memory at address
+  - `call` - Call subroutine (JSR equivalent)
+  - `disasm` - Disassemble memory
+
+  *Breakpoint Commands:*
+  - `break_set` - Set breakpoint at address
+  - `break_clear` - Clear breakpoint by ID or address
+  - `break_list` - List all breakpoints
+  - `break_enable` - Enable breakpoint
+  - `break_disable` - Disable breakpoint
+  - `watch_set` - Set watchpoint (break on memory change)
+
+  *Disk Commands:*
   - `disk_status` - Get active drive and spinning status
   - `disk_insert` - Insert disk image into drive 1 or 2
   - `disk_eject` - Eject disk from drive
-  - `quit` - Exit emulator
+
+  *Graphics Commands:*
+  - `hgr` - Capture HGR (280x192) to PPM file
+  - `gr` - Capture GR (40x48) to PPM file
+  - `dhgr` - Capture DHGR (560x192) to PPM file
+  - `dgr` - Capture DGR (80x48) to PPM file
+
+  *State Commands:*
+  - `save_state` - Save full emulator state to file
+  - `load_state` - Load emulator state from file
+
+  *System Commands:*
+  - `keys` - Inject keystrokes into keyboard buffer
+  - `mouse` - Control mouse position and button
+  - `slots` - Get peripheral slot configuration
+  - `softswitches` - Get display/memory soft switch states
+  - `speed` - Set turbo mode
+  - `cycles` - Get cycle/instruction/frame counts
+  - `trace` - Enable/disable instruction tracing
 
   **Files created**:
   - `bobbin/src/control_socket.c` - Socket server implementation
