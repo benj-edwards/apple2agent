@@ -1043,3 +1043,47 @@ class Emulator:
             self.exit_debugger()
 
         return "Saved" in output
+
+    def save_state(self, filepath: str) -> dict:
+        """Save emulator state (CPU, 128KB RAM, soft switches) to a file.
+
+        Args:
+            filepath: Output file path
+
+        Returns:
+            Dict with ok=True on success, or error message
+        """
+        if not self.is_running:
+            raise BobbinError("Emulator not running")
+
+        # Requires control socket
+        if not self.control_socket:
+            return {"error": "Control socket not available"}
+
+        try:
+            return self.control_socket.save_state(filepath)
+        except ControlSocketError as e:
+            return {"error": str(e)}
+
+    def load_state(self, filepath: str) -> dict:
+        """Load emulator state from a file.
+
+        Instantly restores CPU, 128KB RAM, and soft switches.
+
+        Args:
+            filepath: State file to load
+
+        Returns:
+            Dict with ok=True and version on success, or error message
+        """
+        if not self.is_running:
+            raise BobbinError("Emulator not running")
+
+        # Requires control socket
+        if not self.control_socket:
+            return {"error": "Control socket not available"}
+
+        try:
+            return self.control_socket.load_state(filepath)
+        except ControlSocketError as e:
+            return {"error": str(e)}

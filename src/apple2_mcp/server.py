@@ -939,6 +939,52 @@ async def list_tools() -> list[Tool]:
                 "required": ["x", "y"]
             }
         ),
+
+        # State Snapshots
+        Tool(
+            name="save_state",
+            description="Save emulator state (CPU, 128KB RAM, soft switches) to a file. Use this to create snapshots for instant environment loading.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to save state file (e.g., '/tmp/basic.state')"
+                    }
+                },
+                "required": ["path"]
+            }
+        ),
+        Tool(
+            name="load_state",
+            description="Load emulator state from a file. Instantly restores CPU, 128KB RAM, and soft switches.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to state file to load"
+                    }
+                },
+                "required": ["path"]
+            }
+        ),
+        Tool(
+            name="load_basic_env",
+            description="Instantly load a pre-baked BASIC environment (Apple //e at ] prompt). Much faster than boot.",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
+        ),
+        Tool(
+            name="load_prodos_env",
+            description="Instantly load a pre-baked ProDOS BASIC environment. Much faster than boot with disk.",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
+        ),
     ]
 
 
@@ -1866,6 +1912,48 @@ RESULT_BTN = $0304
         emu.run_basic_command(pokes)
 
         return f"Mouse set to X={x}, Y={y}, button={'pressed' if button else 'released'}"
+
+    # --- State Snapshots ---
+    elif name == "save_state":
+        path = args["path"]
+        result = emu.save_state(path)
+        if result.get("ok"):
+            return f"State saved to: {path}"
+        else:
+            return f"Failed to save state: {result.get('error', 'unknown error')}"
+
+    elif name == "load_state":
+        path = args["path"]
+        result = emu.load_state(path)
+        if result.get("ok"):
+            version = result.get("version", 1)
+            return f"State loaded from: {path} (version {version})"
+        else:
+            return f"Failed to load state: {result.get('error', 'unknown error')}"
+
+    elif name == "load_basic_env":
+        # Load pre-baked BASIC environment
+        states_dir = Path(__file__).parent.parent.parent / "states"
+        basic_state = states_dir / "basic.state"
+        if not basic_state.exists():
+            return f"BASIC environment snapshot not found at {basic_state}. Run tools/create_snapshots.py first."
+        result = emu.load_state(str(basic_state))
+        if result.get("ok"):
+            return "BASIC environment loaded. Ready at ] prompt."
+        else:
+            return f"Failed to load BASIC environment: {result.get('error', 'unknown error')}"
+
+    elif name == "load_prodos_env":
+        # Load pre-baked ProDOS BASIC environment
+        states_dir = Path(__file__).parent.parent.parent / "states"
+        prodos_state = states_dir / "prodos.state"
+        if not prodos_state.exists():
+            return f"ProDOS environment snapshot not found at {prodos_state}. Run tools/create_snapshots.py first."
+        result = emu.load_state(str(prodos_state))
+        if result.get("ok"):
+            return "ProDOS BASIC environment loaded. Ready at ] prompt."
+        else:
+            return f"Failed to load ProDOS environment: {result.get('error', 'unknown error')}"
 
     else:
         return f"Unknown tool: {name}"

@@ -1,5 +1,12 @@
 # Apple II Agent - THE MISSION
 
+## Bobbin Emulator Source
+
+**Canonical source:** a checkout of `bobbin-ai`
+
+The apple2agent project includes a copy of the Bobbin binary at `bobbin/src/bobbin`.
+When making changes to Bobbin, edit the canonical source and rebuild, then copy to this project.
+
 ## PRIMARY DIRECTIVE
 
 **AGENTIC SOFTWARE DEVELOPMENT FOR APPLE II**
@@ -143,9 +150,9 @@ status = sock.disk_status()  # {active, spinning}
 sock.capture_hgr('/tmp/screen.ppm', page=1, color=True)
 sock.capture_gr('/tmp/lores.ppm')
 
-# State snapshots (NOT YET IMPLEMENTED IN BOBBIN)
-# sock.save_state('/tmp/state.bin')  # TODO: implement in Bobbin
-# sock.load_state('/tmp/state.bin')  # TODO: implement in Bobbin
+# State snapshots (saves 128KB: main + aux memory)
+sock.save_state('/tmp/state.bin')
+sock.load_state('/tmp/state.bin')
 
 # System info
 switches = sock.get_softswitches()  # {text, hires, page2, ...}
@@ -167,7 +174,7 @@ sock.disconnect()
 | **Breakpoints** | `break_set`, `break_clear`, `break_list`, `break_enable`, `break_disable`, `watch_set` |
 | **Disks** | `disk_status`, `disk_insert`, `disk_eject` |
 | **Graphics** | `hgr`, `gr`, `dhgr`, `dgr` (export to PPM) |
-| **State** | `save_state`, `load_state` (NOT YET IMPLEMENTED) |
+| **State** | `save_state`, `load_state` (128KB: main + aux memory) |
 | **System** | `keys`, `mouse`, `slots`, `softswitches`, `speed`, `cycles`, `trace` |
 
 ### Starting Bobbin with Socket
@@ -241,6 +248,52 @@ get_bridge().shutdown()
 | `mcp__apple2-mcp__call` | Call machine code routine |
 | `mcp__apple2-mcp__get_registers` | Get CPU state |
 | `mcp__apple2-mcp__reset` | Reset emulator |
+| `mcp__apple2-mcp__save_state` | Save emulator state to file |
+| `mcp__apple2-mcp__load_state` | Load emulator state from file |
+
+## State Snapshots & Instant Environments
+
+Save and restore complete emulator state (CPU, 128KB RAM, soft switches).
+
+### MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `save_state` | Save emulator state to a file |
+| `load_state` | Load emulator state from a file |
+| `load_basic_env` | Instantly load BASIC environment (no boot wait) |
+| `load_prodos_env` | Instantly load ProDOS environment (no boot wait) |
+
+### Creating Snapshots
+
+```bash
+# Generate pre-baked environment snapshots
+python3 tools/create_snapshots.py
+```
+
+This creates:
+- `states/basic.state` - Apple //e at ] prompt (no disk)
+- `states/prodos.state` - ProDOS 2.4 with BASIC.SYSTEM
+
+### Using Instant Environments
+
+```python
+# Option 1: Use MCP tools
+mcp__apple2-mcp__load_basic_env()  # Instant BASIC ready
+mcp__apple2-mcp__load_prodos_env()  # Instant ProDOS ready
+
+# Option 2: Use control socket directly
+sock.load_state('states/basic.state')
+```
+
+### State File Format
+
+- Header: `BOBBIN_STATE_V2\n` (16 bytes)
+- CPU registers (Registers struct)
+- Memory (128KB: main 64KB + aux 64KB)
+- Soft switches (SoftSwitches struct)
+
+V1 files (64KB only) are still supported for loading.
 
 ## Key Files
 
@@ -255,6 +308,8 @@ get_bridge().shutdown()
 | `src/apple2_mcp/control_socket.py` | **Control socket client** - USE THIS for emulator control |
 | `tools/make_agent_disk.py` | **Creates contiguous disk images** - uses ProDOS 2.4 boot blocks |
 | `tools/prodos_disk.py` | ProDOS disk manipulation (catalog, add, extract) |
+| `tools/create_snapshots.py` | **Creates environment snapshots** - BASIC and ProDOS states |
+| `states/` | Pre-baked environment snapshots for instant loading |
 | `bobbin_socket.md` | Control socket design document |
 
 ## Commands
@@ -297,6 +352,8 @@ Working:
 - `/CODE` command - generates and injects BASIC code ✅
 - Code tokenization and memory injection ✅
 - Control socket integration ✅
+- **State save/load** - 128KB (main + aux) snapshots ✅
+- **Instant environments** - load_basic_env, load_prodos_env ✅
 
 Needs testing:
 - End-to-end with real Apple II hardware

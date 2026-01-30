@@ -305,6 +305,15 @@ class EmulatorBridge:
             self.sock.inject_keys(char)
             return {"ok": True}
 
+        # State save/load
+        if tool_name == "mcp__apple2-mcp__save_state":
+            path = params.get("path", "/tmp/state.bin")
+            return self.sock.save_state(path)
+
+        if tool_name == "mcp__apple2-mcp__load_state":
+            path = params.get("path", "/tmp/state.bin")
+            return self.sock.load_state(path)
+
         return {"error": f"Unknown tool: {tool_name}"}
 
     def _assemble(self, source: str, load_addr: int) -> dict:
