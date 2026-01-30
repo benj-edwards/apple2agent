@@ -100,8 +100,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "timeout": {
                         "type": "number",
-                        "default": 30,
-                        "description": "Timeout in seconds waiting for BASIC prompt (default: 30)"
+                        "default": 60,
+                        "description": "Timeout in seconds waiting for BASIC prompt (default: 60)"
                     },
                     "wait_for_prompt": {
                         "type": "boolean",
@@ -969,7 +969,7 @@ async def _call_tool_impl(name: str, args: dict[str, Any]) -> str:
         disk = args.get("disk")
         uthernet2 = args.get("uthernet2", False)
         mouse = args.get("mouse", False)
-        timeout = args.get("timeout", 30)
+        timeout = args.get("timeout", 60)
         wait_for_prompt = args.get("wait_for_prompt", True)
         output = emu.boot(machine=machine, disk=disk, uthernet2=uthernet2, mouse=mouse,
                           timeout=timeout, wait_for_prompt=wait_for_prompt)
@@ -1274,13 +1274,13 @@ async def _call_tool_impl(name: str, args: dict[str, Any]) -> str:
     # --- BASIC ---
     elif name == "run_basic":
         command = args["command"]
-        timeout = args.get("timeout", 30)
+        timeout = args.get("timeout", 60)
         output = emu.run_basic_command(command, timeout=timeout)
         return output
 
     elif name == "run_and_capture":
         command = args.get("command", "RUN")
-        timeout = args.get("timeout", 30)
+        timeout = args.get("timeout", 60)
         capture_mode = args.get("capture_mode", "gr")
 
         # Run the command

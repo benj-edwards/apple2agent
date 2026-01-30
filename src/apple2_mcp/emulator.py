@@ -90,14 +90,14 @@ class Emulator:
         return self.process is not None and self.process.isalive()
 
     def boot(self, machine: str = "enhanced", disk: Optional[str] = None,
-             timeout: float = 30.0, uthernet2: bool = False,
+             timeout: float = 60.0, uthernet2: bool = False,
              mouse: bool = False, wait_for_prompt: bool = True) -> str:
         """Start the emulator and optionally wait for BASIC prompt.
 
         Args:
             machine: Machine type (plus, enhanced, twoey, original)
             disk: Optional disk image path to load
-            timeout: Timeout in seconds for boot (default 30)
+            timeout: Timeout in seconds for boot (default 60)
             uthernet2: Enable Uthernet II network card emulation in slot 3
             mouse: Enable AppleMouse card emulation in slot 4
             wait_for_prompt: Wait for BASIC prompt (set False for ProDOS selector disks)
