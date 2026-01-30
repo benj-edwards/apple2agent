@@ -8,6 +8,8 @@ The layout is NOT linear. Each group of 8 lines shares a base address,
 with 128-byte offsets between lines in the group.
 """
 
+from __future__ import annotations
+
 from .encoding import apple2_to_ascii
 
 # Text Page 1 base address

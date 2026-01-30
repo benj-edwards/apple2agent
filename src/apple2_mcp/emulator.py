@@ -11,6 +11,8 @@ Provides methods for:
 - Managing snapshots
 """
 
+from __future__ import annotations
+
 import os
 import re
 import signal
@@ -176,7 +178,7 @@ class Emulator:
             else:
                 self.control_socket = None
 
-        return self.process.before + "]"
+        return (self.process.before or "") + "]"
 
     def shutdown(self):
         """Stop the emulator."""

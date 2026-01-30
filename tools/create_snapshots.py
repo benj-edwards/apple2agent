@@ -38,13 +38,15 @@ SNAPSHOTS = [
         "disk": None,
         "output": STATES_DIR / "basic.state",
     },
-    {
-        "name": "prodos",
-        "description": "ProDOS 2.4 with BASIC.SYSTEM",
-        "machine": "enhanced",
-        "disk": str(DISKS_DIR / "ProDOS_2_4.dsk"),
-        "output": STATES_DIR / "prodos.state",
-    },
+    # ProDOS snapshot disabled - ProDOS_2_4.dsk boots to BITSY.BOOT selector
+    # To enable: create a ProDOS disk that boots directly to BASIC.SYSTEM
+    # {
+    #     "name": "prodos",
+    #     "description": "ProDOS 2.4 with BASIC.SYSTEM",
+    #     "machine": "enhanced",
+    #     "disk": str(DISKS_DIR / "ProDOS_2_4.dsk"),
+    #     "output": STATES_DIR / "prodos.state",
+    # },
 ]
 
 
@@ -78,10 +80,12 @@ def create_snapshot(config: dict, verbose: bool = True) -> bool:
 
         boot_kwargs = {
             "machine": config["machine"],
-            "timeout": 60.0,
+            "timeout": 120.0,  # Longer timeout for disk boots
         }
         if config.get("disk"):
             boot_kwargs["disk"] = config["disk"]
+            # ProDOS disks may take longer to boot
+            boot_kwargs["timeout"] = 120.0
             if verbose:
                 print(f"With disk: {config['disk']}")
 
