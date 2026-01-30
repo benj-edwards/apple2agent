@@ -25,6 +25,7 @@ from .screen import format_screen
 from .encoding import APPLESOFT_TOKENS, detokenize_byte
 from .disktools import DOS33Disk, tokenize_basic
 from .assembler import assemble, get_template, list_templates
+from . import proxy_control
 
 # Global emulator instance
 _emulator: Optional[Emulator] = None
@@ -983,6 +984,52 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {}
+            }
+        ),
+
+        # Proxy Control
+        Tool(
+            name="proxy_start",
+            description="Start the Apple II agent proxy server. The proxy bridges the Apple II to Claude API.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "port": {
+                        "type": "integer",
+                        "default": 8080,
+                        "description": "Port to listen on (default: 8080)"
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="proxy_stop",
+            description="Stop the Apple II agent proxy server.",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
+        ),
+        Tool(
+            name="proxy_status",
+            description="Get the status of the Apple II agent proxy server.",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
+        ),
+        Tool(
+            name="proxy_log",
+            description="Get recent proxy server log output.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "lines": {
+                        "type": "integer",
+                        "default": 50,
+                        "description": "Number of log lines to return"
+                    }
+                }
             }
         ),
     ]
@@ -1954,6 +2001,30 @@ RESULT_BTN = $0304
             return "ProDOS BASIC environment loaded. Ready at ] prompt."
         else:
             return f"Failed to load ProDOS environment: {result.get('error', 'unknown error')}"
+
+    # --- Proxy Control ---
+    elif name == "proxy_start":
+        port = args.get("port", 8080)
+        result = proxy_control.start(port=port)
+        if result["success"]:
+            return f"Proxy started (PID: {result['pid']}, port: {result['port']})\nLog: {result['log_file']}"
+        else:
+            return f"Failed to start proxy: {result['error']}"
+
+    elif name == "proxy_stop":
+        result = proxy_control.stop()
+        return result["message"]
+
+    elif name == "proxy_status":
+        result = proxy_control.status()
+        if result["running"]:
+            return f"Proxy is running (PID: {result['pid']})\nLog: {result['log_file']}"
+        else:
+            return "Proxy is not running"
+
+    elif name == "proxy_log":
+        lines = args.get("lines", 50)
+        return proxy_control.get_log(lines=lines)
 
     else:
         return f"Unknown tool: {name}"
