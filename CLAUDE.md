@@ -374,6 +374,7 @@ Working:
 - **State save/load** - 128KB (main + aux) snapshots ✅
 - **Instant environments** - load_basic_env works, load_prodos_env pending ✅
 - **Multi-client socket** - up to 16 simultaneous connections ✅
+- **Disk tools** - `prodos.py` list/add/del and `make_agent_disk.py` work correctly ✅
 
 Needs testing:
 - End-to-end with real Apple II hardware
@@ -381,10 +382,9 @@ Needs testing:
 
 Known issues:
 - **Agentic mode code injection** - fix ready in `asm/agent.s` (dst_ptr init at offset=0)
-- `tools/prodos.py` corrupts disk images - can't deploy new agent
 - Connection drops after first response (timeout handling)
 
-## Ready to Deploy (blocked by disk tool)
+## Ready to Deploy
 
 The fix for agentic mode code injection is in `asm/agent.s`:
 - `handle_code_chunk` now initializes `dst_ptr` to `BASIC_START` when offset=0
@@ -404,3 +404,4 @@ The fix for agentic mode code injection is in `asm/agent.s`:
 9. **Control socket has EVERYTHING** - peek, poke, step, breakpoints, graphics capture, state save/load
 10. **MULTI-CLIENT SOCKET** - up to 16 agents can connect simultaneously for parallel work
 11. **INSTANT BASIC** - use `load_basic_env` or load `states/basic.state` to skip boot
+12. **DISK TOOLS WORK** - `python3 tools/prodos.py list/add/del` and `make_agent_disk.py` are fully functional
