@@ -314,6 +314,66 @@ sock.load_state('states/basic.state')
 
 V1 files (64KB only) are still supported for loading.
 
+## Disk Toolchain
+
+Tools for creating and managing ProDOS disk images. **All tools are working and tested.**
+
+### Quick Reference
+
+```bash
+# List files on a disk
+python3 tools/prodos.py list disks/agent_contiguous.dsk
+
+# Add a file to disk
+python3 tools/prodos.py add <disk> <local_file> <prodos_name> [type] [aux_addr]
+# Example: python3 tools/prodos.py add disks/agent.dsk build/AGENT.BIN AGENT.BIN BIN 6000
+
+# Delete a file from disk
+python3 tools/prodos.py del <disk> <prodos_name>
+
+# Create fresh bootable agent disk (contiguous allocation)
+python3 tools/make_agent_disk.py [output.dsk] [--test]
+```
+
+### File Types
+
+| Type | Code | Description |
+|------|------|-------------|
+| BIN | 06 | Binary file (requires aux=load address) |
+| SYS | FF | System file (ProDOS executable) |
+| BAS | FC | Applesoft BASIC (aux=$0801) |
+| TXT | 04 | Text file |
+
+### Disk Formats
+
+| Extension | Format | Notes |
+|-----------|--------|-------|
+| `.dsk` | DOS-order | Uses sector interleaving, most common |
+| `.do` | DOS-order | Same as .dsk |
+| `.po` | ProDOS-order | Sequential blocks, less common |
+
+**Use `.dsk` files** - they work with hardware disk emulators and are the default.
+
+### Rebuilding Agent Disk
+
+```bash
+# Full rebuild workflow
+make agent                              # Build AGENT.BIN
+python3 tools/make_agent_disk.py        # Create disks/agent_contiguous.dsk
+python3 tools/prodos.py list disks/agent_contiguous.dsk  # Verify
+```
+
+### Tool Architecture
+
+```
+tools/prodos.py          # Unified CLI (delegates to below)
+  ├── tools/prodos_add.py    # Add files (handles .dsk/.po format)
+  └── tools/prodos_delete.py # Delete files, list catalog
+
+tools/make_agent_disk.py # Standalone: creates bootable disk with contiguous allocation
+tools/prodos_disk.py     # Reference library (not used by CLI)
+```
+
 ## Key Files
 
 | File | Purpose |
