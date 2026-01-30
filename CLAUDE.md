@@ -116,6 +116,25 @@ Claude will:
 
 **The control socket is the reliable way to control the emulator.** It bypasses all pexpect/PTY/signal issues.
 
+### Multi-Client Support
+
+The control socket supports **up to 16 simultaneous clients**. This enables:
+- Multiple AI agents working on the same emulator
+- Parallel development of program variations
+- MCP server + external scripts running together
+
+```python
+# Multiple agents can connect simultaneously
+agent1 = BobbinControlSocket('/tmp/bobbin.sock')
+agent2 = BobbinControlSocket('/tmp/bobbin.sock')
+agent1.connect()
+agent2.connect()
+
+# Both can send commands - responses route to correct client
+agent1.peek(0x400, 10)  # Agent 1 gets its response
+agent2.peek(0x800, 10)  # Agent 2 gets its response
+```
+
 ### Python Client
 ```python
 from apple2_mcp.control_socket import BobbinControlSocket
@@ -272,8 +291,8 @@ python3 tools/create_snapshots.py
 ```
 
 This creates:
-- `states/basic.state` - Apple //e at ] prompt (no disk)
-- `states/prodos.state` - ProDOS 2.4 with BASIC.SYSTEM
+- `states/basic.state` - Apple //e at ] prompt (no disk) ✅ **WORKING**
+- `states/prodos.state` - ProDOS with BASIC.SYSTEM (pending - needs direct-boot disk)
 
 ### Using Instant Environments
 
@@ -353,7 +372,8 @@ Working:
 - Code tokenization and memory injection ✅
 - Control socket integration ✅
 - **State save/load** - 128KB (main + aux) snapshots ✅
-- **Instant environments** - load_basic_env, load_prodos_env ✅
+- **Instant environments** - load_basic_env works, load_prodos_env pending ✅
+- **Multi-client socket** - up to 16 simultaneous connections ✅
 
 Needs testing:
 - End-to-end with real Apple II hardware
@@ -382,3 +402,5 @@ The fix for agentic mode code injection is in `asm/agent.s`:
 7. **The mission is autonomous coding** - not just chat
 8. **/CODE command WORKS** - use it while agentic mode injection is broken
 9. **Control socket has EVERYTHING** - peek, poke, step, breakpoints, graphics capture, state save/load
+10. **MULTI-CLIENT SOCKET** - up to 16 agents can connect simultaneously for parallel work
+11. **INSTANT BASIC** - use `load_basic_env` or load `states/basic.state` to skip boot
