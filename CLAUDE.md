@@ -269,6 +269,10 @@ get_bridge().shutdown()
 | `mcp__apple2-mcp__reset` | Reset emulator |
 | `mcp__apple2-mcp__save_state` | Save emulator state to file |
 | `mcp__apple2-mcp__load_state` | Load emulator state from file |
+| `mcp__apple2-mcp__proxy_start` | Start the proxy server |
+| `mcp__apple2-mcp__proxy_stop` | Stop the proxy server |
+| `mcp__apple2-mcp__proxy_status` | Get proxy status (running, PID) |
+| `mcp__apple2-mcp__proxy_log` | Get recent proxy log output |
 
 ## State Snapshots & Instant Environments
 
@@ -435,14 +439,18 @@ Working:
 - **Instant environments** - load_basic_env works, load_prodos_env pending ✅
 - **Multi-client socket** - up to 16 simultaneous connections ✅
 - **Disk tools** - `prodos.py` list/add/del and `make_agent_disk.py` work correctly ✅
+- **Proxy control via MCP** - `proxy_start`, `proxy_stop`, `proxy_status`, `proxy_log` tools ✅
 
 Needs testing:
 - End-to-end with real Apple II hardware
 - Full agentic workflow (user request → emulator test → deploy)
+- **Proxy MCP tools** - restart MCP server to load new tools, then test `proxy_start`/`proxy_stop`
+- **Agent network connection** - agent connects to proxy at configured IP, test with `/SETIP`
 
 Known issues:
-- **Agentic mode code injection** - fix ready in `asm/agent.s` (dst_ptr init at offset=0)
+- **Agentic mode code injection** - fix in `asm/agent.s` needs testing (dst_ptr init at offset=0)
 - Connection drops after first response (timeout handling)
+- **Agent default IP** - defaults to 192.168.64.1, use `/SETIP x.x.x.x` to set correct host IP
 
 ## Ready to Deploy
 
@@ -465,3 +473,5 @@ The fix for agentic mode code injection is in `asm/agent.s`:
 10. **MULTI-CLIENT SOCKET** - up to 16 agents can connect simultaneously for parallel work
 11. **INSTANT BASIC** - use `load_basic_env` or load `states/basic.state` to skip boot
 12. **DISK TOOLS WORK** - `python3 tools/prodos.py list/add/del` and `make_agent_disk.py` are fully functional
+13. **PROXY VIA MCP** - use `proxy_start`/`proxy_stop`/`proxy_status`/`proxy_log` MCP tools instead of shell commands
+14. **SET AGENT IP** - use `/SETIP x.x.x.x` on Apple II to configure proxy IP (default 192.168.64.1 rarely works)
