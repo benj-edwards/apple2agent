@@ -501,8 +501,8 @@ def main():
         else:
             output_path = arg
 
-    # Source files
-    template_disk = os.path.join(project_dir, 'disks', 'agent.dsk')
+    # Source files - use ProDOS 2.4 master for boot blocks and system files
+    template_disk = os.path.join(project_dir, 'disks', 'ProDOS_2_4.dsk')
     agent_bin = os.path.join(project_dir, 'build', 'AGENT.BIN')
 
     print("=" * 60)

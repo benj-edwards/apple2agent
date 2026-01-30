@@ -79,8 +79,10 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 ### 2. Boot Emulator
 ```
-mcp__apple2-mcp__boot(machine="enhanced", uthernet2=true, disk="disks/agent.dsk")
+mcp__apple2-mcp__boot(machine="enhanced", uthernet2=true, disk="disks/agent_contiguous.dsk")
 ```
+
+**Note:** Use `agent_contiguous.dsk` - it has proper boot blocks and contiguous file allocation for hardware disk emulators.
 
 ### 3. Run Agent
 ```
@@ -141,9 +143,9 @@ status = sock.disk_status()  # {active, spinning}
 sock.capture_hgr('/tmp/screen.ppm', page=1, color=True)
 sock.capture_gr('/tmp/lores.ppm')
 
-# State snapshots
-sock.save_state('/tmp/state.bin')
-sock.load_state('/tmp/state.bin')
+# State snapshots (NOT YET IMPLEMENTED IN BOBBIN)
+# sock.save_state('/tmp/state.bin')  # TODO: implement in Bobbin
+# sock.load_state('/tmp/state.bin')  # TODO: implement in Bobbin
 
 # System info
 switches = sock.get_softswitches()  # {text, hires, page2, ...}
@@ -165,7 +167,7 @@ sock.disconnect()
 | **Breakpoints** | `break_set`, `break_clear`, `break_list`, `break_enable`, `break_disable`, `watch_set` |
 | **Disks** | `disk_status`, `disk_insert`, `disk_eject` |
 | **Graphics** | `hgr`, `gr`, `dhgr`, `dgr` (export to PPM) |
-| **State** | `save_state`, `load_state` |
+| **State** | `save_state`, `load_state` (NOT YET IMPLEMENTED) |
 | **System** | `keys`, `mouse`, `slots`, `softswitches`, `speed`, `cycles`, `trace` |
 
 ### Starting Bobbin with Socket
@@ -251,6 +253,8 @@ get_bridge().shutdown()
 | `asm/agent.s` | Apple II client (6502 assembly) |
 | `src/apple2_mcp/` | MCP server for emulator control (used by Claude Code) |
 | `src/apple2_mcp/control_socket.py` | **Control socket client** - USE THIS for emulator control |
+| `tools/make_agent_disk.py` | **Creates contiguous disk images** - uses ProDOS 2.4 boot blocks |
+| `tools/prodos_disk.py` | ProDOS disk manipulation (catalog, add, extract) |
 | `bobbin_socket.md` | Control socket design document |
 
 ## Commands

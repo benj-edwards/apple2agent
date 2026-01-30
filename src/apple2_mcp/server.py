@@ -97,6 +97,16 @@ async def list_tools() -> list[Tool]:
                         "type": "boolean",
                         "default": False,
                         "description": "Enable AppleMouse card in slot 4"
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "default": 30,
+                        "description": "Timeout in seconds waiting for BASIC prompt (default: 30)"
+                    },
+                    "wait_for_prompt": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Wait for BASIC prompt (set False for ProDOS disks that boot to selector)"
                     }
                 }
             }
@@ -959,7 +969,10 @@ async def _call_tool_impl(name: str, args: dict[str, Any]) -> str:
         disk = args.get("disk")
         uthernet2 = args.get("uthernet2", False)
         mouse = args.get("mouse", False)
-        output = emu.boot(machine=machine, disk=disk, uthernet2=uthernet2, mouse=mouse)
+        timeout = args.get("timeout", 30)
+        wait_for_prompt = args.get("wait_for_prompt", True)
+        output = emu.boot(machine=machine, disk=disk, uthernet2=uthernet2, mouse=mouse,
+                          timeout=timeout, wait_for_prompt=wait_for_prompt)
         extras = []
         if uthernet2:
             extras.append("uthernet2 in slot 3")
