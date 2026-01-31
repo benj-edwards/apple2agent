@@ -1192,6 +1192,9 @@ send_chat:
         rts
 
 @connected:
+        ; Clear output area for new response
+        jsr clear_output_area
+
         ; Initialize receive state BEFORE sending (callbacks may trigger)
         lda #0
         sta recv_state
@@ -1763,7 +1766,10 @@ recv_callback:
 
         ; WORKAROUND: Only process ONE packet per callback
         ; Multiple packets in one callback causes crash (unknown root cause)
-        ; Reset state for next callback
+        ; Reset state for next callback UNLESS we're done
+        lda recv_state
+        cmp #STATE_DONE
+        beq @done            ; Don't reset if response is complete!
         lda #STATE_MAGIC_0
         sta recv_state
         jmp @done            ; Exit immediately after first packet
@@ -2146,6 +2152,8 @@ output_char:
         lda output_row
         sta CV
         jsr VTAB
+        lda output_col       ; MUST set CH - other code may have changed it
+        sta CH
 
         pla                  ; Restore character
         jsr COUT
@@ -2289,6 +2297,37 @@ status_msg:
         lda #0
         sta CH               ; Start at column 0
         jsr CLREOL
+        rts
+
+;-------------------------------------------------------------------------------
+; Clear output area and reset cursor for new response
+;-------------------------------------------------------------------------------
+clear_output_area:
+        ; Reset output position
+        lda #OUTPUT_START
+        sta output_row
+        lda #0
+        sta output_col
+
+        ; Clear each line from OUTPUT_START to OUTPUT_END-1
+        lda #OUTPUT_START
+@clear_loop:
+        sta CV
+        pha
+        jsr VTAB
+        jsr CLREOL
+        pla
+        clc
+        adc #1
+        cmp #OUTPUT_END
+        bcc @clear_loop
+
+        ; Position cursor at start
+        lda #OUTPUT_START
+        sta CV
+        jsr VTAB
+        lda #0
+        sta CH
         rts
 
 ;-------------------------------------------------------------------------------
