@@ -384,7 +384,7 @@ class AppleIISession:
         self.columns = 40
         self.model = MODEL_SONNET  # Default model
         self.custom_prompt = None  # Custom system prompt
-        self.agentic_mode = True  # DEFAULT ON - agentic software development is the primary mission
+        self.agentic_mode = True  # DEFAULT ON - agentic software development
         self.mcp_call = mcp_call  # Function to call MCP tools (for emulator)
         self.agentic_claude: Optional[AgenticClaude] = None
         self.max_turns = 20  # Max agentic turns
@@ -460,14 +460,17 @@ class AppleIISession:
 
         # Initialize agentic Claude if agentic mode is on by default
         if self.agentic_mode and not self.agentic_claude:
+            # Use a no-op status function to avoid overwhelming Apple II
+            # Status updates crash the Apple II when sent rapidly
+            def noop_status(msg): pass
             self.agentic_claude = AgenticClaude(
                 send_to_apple2=self._send_response,
-                send_status=self._send_status,
+                send_status=noop_status,  # Disabled - crashes Apple II
                 send_code=self._send_basic_code,
                 mcp_call=self.mcp_call,
                 send_binary=self._send_binary_code
             )
-            print(f"[Session] Agentic Claude initialized (default ON)")
+            print(f"[Session] Agentic Claude initialized (status disabled)")
 
     def _handle_chat(self, packet: Packet):
         """Handle CHAT packet - user message."""
@@ -611,10 +614,12 @@ class AppleIISession:
                                     model=self.model, custom_prompt=self.custom_prompt)
 
     def _send(self, packet: bytes):
-        """Send raw packet."""
+        """Send raw packet with throttling for Apple II."""
+        import time
         try:
             self.sock.sendall(packet)
             print(f"[Session] -> sent {len(packet)} bytes: {packet[:20].hex()}...")
+            time.sleep(0.2)  # Throttle ALL sends - Apple II needs time to process
         except (BrokenPipeError, ConnectionResetError) as e:
             print(f"[Session] Send error: {e}")
             self.running = False

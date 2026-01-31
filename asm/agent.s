@@ -525,9 +525,11 @@ main_ui:
 ; Draw the UI
 ;-------------------------------------------------------------------------------
 draw_ui:
-        ; Initialize output row (OUTPUT_START-1 so first scroll_output goes to row 2)
-        lda #OUTPUT_START-1
+        ; Initialize output position to first output line
+        lda #OUTPUT_START
         sta output_row
+        lda #0
+        sta output_col
 
         ; Header
         lda #HEADER_LINE
@@ -1513,29 +1515,25 @@ receive_response_no_init:
         jsr print
 
 @wait_loop:
-        ; DEBUG: Mark loop iteration
-        inc $0458            ; Line 16 col 8
         jsr ip65_process
-        ; DEBUG: After ip65_process
-        inc $0459            ; Line 16 col 9
 
         ; Send any pending ACKs (after callback returns)
         jsr send_pending_acks
-        ; DEBUG: After send_pending_acks
-        inc $045A            ; Line 16 col 10
 
         ; Check for completion
         lda recv_state
         cmp #STATE_DONE
         beq @done
 
-        ; Check timeout
-        inc timeout_lo
-        bne @wait_loop
-        inc timeout_hi
-        lda timeout_hi
-        cmp #$FF             ; Very long timeout (255 * 256 = 65280 iterations)
-        bcc @wait_loop
+        ; Check timeout - disabled for agentic mode which can take minutes
+        ; Agentic loop involves multiple Claude API calls + emulator testing
+        ; inc timeout_lo
+        ; bne @wait_loop
+        ; inc timeout_hi
+        ; lda timeout_hi
+        ; cmp #$FF
+        ; bcc @wait_loop
+        jmp @wait_loop       ; No timeout - wait forever
 
         ; Timeout
         jsr status_msg
@@ -1549,15 +1547,6 @@ receive_response_no_init:
 ; TCP receive callback - A2P protocol parser
 ;-------------------------------------------------------------------------------
 recv_callback:
-        ; DEBUG: Show callback entry at screen position
-        inc $0650            ; Increment char at position
-
-        ; DEBUG: Show data length at $0658-$0659
-        lda tcp_inbound_data_length
-        sta $0658
-        lda tcp_inbound_data_length+1
-        sta $0659
-
         ; Prevent re-entry (tcp_send can trigger this callback)
         lda in_callback
         bne @skip_reentry
@@ -1569,13 +1558,9 @@ recv_callback:
 
         dec in_callback
 @skip_reentry:
-        ; DEBUG: Show skip/no-data at $065A
-        inc $065A
         rts
 
 @have_data:
-        ; DEBUG: Show we have data
-        inc $0651            ; Increment char at position
 
         ; Reset packet count for this callback
         lda #0
@@ -1644,14 +1629,8 @@ recv_callback:
         jmp @done
 
 @state_magic_0:
-        ; DEBUG: Show bytes being checked for magic
-        pha
-        inc $0652            ; Count bytes scanned
-        pla
         cmp #A2P_MAGIC_0
         bne @process_loop    ; Keep scanning
-        ; DEBUG: Found 'A'
-        inc $0653
         lda #STATE_MAGIC_1
         sta recv_state
         jmp @process_loop
@@ -1659,8 +1638,6 @@ recv_callback:
 @state_magic_1:
         cmp #A2P_MAGIC_1
         bne @reset_state
-        ; DEBUG: Found full magic "A2"
-        inc $0654
         lda #STATE_TYPE
         sta recv_state
         lda #0
@@ -1824,15 +1801,6 @@ process_packet:
 
         ; Dispatch by type
         lda pkt_type
-
-        ; DEBUG: Show packet type at fixed screen position
-        pha
-        clc
-        adc #'0'         ; Convert to ASCII digit (0x30-0x39)
-        ora #$80         ; Set high bit for Apple II display
-        sta $07D0        ; Store at line 23, col 0 (visible status area)
-        inc $07D1        ; Increment counter at next position
-        pla
 
         cmp #PKT_RESP
         beq @handle_resp
@@ -2156,8 +2124,12 @@ output_char:
         ldy output_row
         cpy CV               ; Already on correct row?
         beq @check_wrap
+
+        ; Switching to output row - restore our cursor position
         sty CV
         jsr VTAB             ; Position to output_row
+        lda output_col       ; Restore column position
+        sta CH
 
 @check_wrap:
         ; Check line wrap
@@ -2167,10 +2139,21 @@ output_char:
         jsr do_scroll
         lda #0
         sta CH
+        sta output_col       ; Reset column tracker
 
 @print:
+        ; Always set cursor position before output to avoid corruption
+        lda output_row
+        sta CV
+        jsr VTAB
+
         pla                  ; Restore character
         jsr COUT
+
+        ; Save column position for later
+        lda CH
+        sta output_col
+
         ldy temp2            ; Restore Y
         rts
 
@@ -2178,6 +2161,7 @@ output_char:
         jsr do_scroll
         lda #0
         sta CH
+        sta output_col       ; Reset column tracker
         ldy temp2            ; Restore Y
         rts
 
@@ -2642,6 +2626,7 @@ close_refnum:
 in_ui:          .res 1
 col_mode:       .res 1          ; 0=40col, 1=80col
 output_row:     .res 1
+output_col:     .res 1          ; Column position on output line
 
 ; Protocol state
 tx_seq:         .res 1
