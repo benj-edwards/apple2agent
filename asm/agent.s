@@ -23,7 +23,7 @@
 ;
 ; Usage:
 ;   BRUN AGENT
-;   Type messages at CLAUDE> prompt
+;   Type messages at AGENT> prompt
 ;   Press ESC for menu
 ;
 ;===============================================================================
@@ -561,6 +561,8 @@ draw_prompt:
         lda #INPUT_LINE
         sta CV
         jsr VTAB
+        lda #0
+        sta CH               ; Start at column 0
         ldax #prompt_str
         jsr print
         rts
@@ -572,7 +574,7 @@ position_input:
         lda #INPUT_LINE
         sta CV
         jsr VTAB
-        lda #8               ; After "CLAUDE> "
+        lda #8               ; After "AGENT> "
         sta CH
         rts
 
@@ -1176,8 +1178,9 @@ send_chat:
         lda CONFIG_IP+3
         sta tcp_connect_ip+3
 
-        ; Connect to port 8080
-        ldax #8080
+        ; Connect using configured port
+        lda CONFIG_PORT
+        ldx CONFIG_PORT+1
         jsr tcp_connect
         bcc @connected
 
@@ -1187,14 +1190,35 @@ send_chat:
         rts
 
 @connected:
+        ; Initialize receive state BEFORE sending (callbacks may trigger)
+        lda #0
+        sta recv_state
+        sta got_code
+        sta code_offset
+        sta code_offset+1
+        sta pending_ack_count
+        sta in_callback
+        lda #<BASIC_START
+        sta dst_ptr
+        lda #>BASIC_START
+        sta dst_ptr+1
+
         ; Build and send INIT packet
         jsr send_init_packet
+        ; Process any incoming data
+        jsr ip65_process
+        jsr ip65_process
+        jsr ip65_process
 
         ; Build and send CHAT packet
         jsr send_chat_packet
+        ; Process any incoming data
+        jsr ip65_process
+        jsr ip65_process
+        jsr ip65_process
 
-        ; Wait for response
-        jsr receive_response
+        ; Wait for response (state already initialized)
+        jsr receive_response_no_init
 
         jsr tcp_close
         rts
@@ -1220,7 +1244,9 @@ send_code_request:
         lda CONFIG_IP+3
         sta tcp_connect_ip+3
 
-        ldax #8080
+        ; Connect using configured port
+        lda CONFIG_PORT
+        ldx CONFIG_PORT+1
         jsr tcp_connect
         bcc @connected
 
@@ -1467,8 +1493,8 @@ receive_response:
         sta got_code
         sta code_offset
         sta code_offset+1
-        sta timeout_lo
-        sta timeout_hi
+        sta pending_ack_count
+        sta in_callback
 
         ; Set destination for code injection
         lda #<BASIC_START
@@ -1476,19 +1502,27 @@ receive_response:
         lda #>BASIC_START
         sta dst_ptr+1
 
-        ; Clear pending ACK count
+receive_response_no_init:
+        ; Reset timeout (caller may have initialized other state)
         lda #0
-        sta pending_ack_count
+        sta timeout_lo
+        sta timeout_hi
 
         jsr status_msg
         ldax #msg_receiving
         jsr print
 
 @wait_loop:
+        ; DEBUG: Mark loop iteration
+        inc $0458            ; Line 16 col 8
         jsr ip65_process
+        ; DEBUG: After ip65_process
+        inc $0459            ; Line 16 col 9
 
         ; Send any pending ACKs (after callback returns)
         jsr send_pending_acks
+        ; DEBUG: After send_pending_acks
+        inc $045A            ; Line 16 col 10
 
         ; Check for completion
         lda recv_state
@@ -1500,7 +1534,7 @@ receive_response:
         bne @wait_loop
         inc timeout_hi
         lda timeout_hi
-        cmp #$80             ; Long timeout
+        cmp #$FF             ; Very long timeout (255 * 256 = 65280 iterations)
         bcc @wait_loop
 
         ; Timeout
@@ -1515,15 +1549,38 @@ receive_response:
 ; TCP receive callback - A2P protocol parser
 ;-------------------------------------------------------------------------------
 recv_callback:
-        ; DEBUG: increment counter at $0350 for each callback
-        inc $0350
+        ; DEBUG: Show callback entry at screen position
+        inc $0650            ; Increment char at position
+
+        ; DEBUG: Show data length at $0658-$0659
+        lda tcp_inbound_data_length
+        sta $0658
+        lda tcp_inbound_data_length+1
+        sta $0659
+
+        ; Prevent re-entry (tcp_send can trigger this callback)
+        lda in_callback
+        bne @skip_reentry
+        inc in_callback
 
         lda tcp_inbound_data_length
         ora tcp_inbound_data_length+1
         bne @have_data
+
+        dec in_callback
+@skip_reentry:
+        ; DEBUG: Show skip/no-data at $065A
+        inc $065A
         rts
 
 @have_data:
+        ; DEBUG: Show we have data
+        inc $0651            ; Increment char at position
+
+        ; Reset packet count for this callback
+        lda #0
+        sta recv_pkt_count
+
         ; Reset timeout
         lda #0
         sta timeout_lo
@@ -1546,6 +1603,7 @@ recv_callback:
         jmp @done
 
 @more:
+        ; (debug removed)            ; DEBUG: count bytes processed
         lda (src_ptr),y
         iny
         bne @no_wrap
@@ -1586,8 +1644,14 @@ recv_callback:
         jmp @done
 
 @state_magic_0:
+        ; DEBUG: Show bytes being checked for magic
+        pha
+        inc $0652            ; Count bytes scanned
+        pla
         cmp #A2P_MAGIC_0
         bne @process_loop    ; Keep scanning
+        ; DEBUG: Found 'A'
+        inc $0653
         lda #STATE_MAGIC_1
         sta recv_state
         jmp @process_loop
@@ -1595,6 +1659,8 @@ recv_callback:
 @state_magic_1:
         cmp #A2P_MAGIC_1
         bne @reset_state
+        ; DEBUG: Found full magic "A2"
+        inc $0654
         lda #STATE_TYPE
         sta recv_state
         lda #0
@@ -1680,9 +1746,11 @@ recv_callback:
         jmp @process_loop
 
 @state_checksum:
+        ; (debug removed)            ; DEBUG: count checksum checks
         ; Verify checksum
         cmp pkt_checksum
         bne @bad_checksum
+        ; (debug removed)            ; DEBUG: count checksum passes
 
         ; Packet valid - process it
         ; Save callback state (tcp_send may clobber them)
@@ -1697,7 +1765,10 @@ recv_callback:
         lda tcp_inbound_data_length+1
         pha
 
+        ; Process the packet
         jsr process_packet
+        ; DEBUG: After process_packet at $0353
+        inc $0353
 
         ; Restore callback state
         pla
@@ -1710,11 +1781,15 @@ recv_callback:
         sta src_ptr
         pla
         tay
+        ; DEBUG: After state restore at $0354
+        inc $0354
 
-        ; Reset for next packet
+        ; WORKAROUND: Only process ONE packet per callback
+        ; Multiple packets in one callback causes crash (unknown root cause)
+        ; Reset state for next callback
         lda #STATE_MAGIC_0
         sta recv_state
-        jmp @process_loop
+        jmp @done            ; Exit immediately after first packet
 
 @bad_checksum:
         ; Send NACK
@@ -1724,12 +1799,20 @@ recv_callback:
         jmp @process_loop
 
 @done:
+        ; DEBUG: At @done at $0356
+        inc $0356
+        dec in_callback      ; Exit re-entry guard
+        ; DEBUG: After dec in_callback at $0357
+        inc $0357
         rts
 
 ;-------------------------------------------------------------------------------
 ; Process a complete packet
 ;-------------------------------------------------------------------------------
 process_packet:
+        ; DEBUG: Count process_packet calls at $0360
+        ; (debug removed)
+
         ; Queue ACK for later (don't send from callback)
         ldx pending_ack_count
         cpx #8               ; Max 8 pending ACKs
@@ -1742,11 +1825,13 @@ process_packet:
         ; Dispatch by type
         lda pkt_type
 
-        ; DEBUG: Show packet type
+        ; DEBUG: Show packet type at fixed screen position
         pha
         clc
-        adc #'0'         ; Convert to ASCII digit
-        jsr print_a
+        adc #'0'         ; Convert to ASCII digit (0x30-0x39)
+        ora #$80         ; Set high bit for Apple II display
+        sta $07D0        ; Store at line 23, col 0 (visible status area)
+        inc $07D1        ; Increment counter at next position
         pla
 
         cmp #PKT_RESP
@@ -1893,7 +1978,7 @@ handle_code_chunk:
 ; Handle STATUS packet
 ;-------------------------------------------------------------------------------
 handle_status_msg:
-        jsr status_msg
+        jsr status_msg       ; Position cursor at STATUS_LINE
 
         ldy #0
 @print:
@@ -1901,7 +1986,9 @@ handle_status_msg:
         bcs @done
         lda pkt_buffer,y
         ora #$80
+        sty temp1            ; Save Y before print_a
         jsr print_a
+        ldy temp1            ; Restore Y
         iny
         bne @print
 @done:
@@ -1930,70 +2017,85 @@ handle_error_msg:
 
 ;-------------------------------------------------------------------------------
 ; Send pending ACKs (called after recv_callback returns)
+; CRITICAL: Build all ACKs into buffer first, then send once to avoid
+; feedback loop where tcp_send triggers recv_callback which queues more ACKs
 ;-------------------------------------------------------------------------------
 send_pending_acks:
+        ; DEBUG: Skip ACK sending temporarily to isolate crash
+        rts
+
         lda pending_ack_count
         beq @done            ; No ACKs pending
 
-        ldx #0
-@loop:
-        cpx pending_ack_count
-        bcs @clear
-
-        lda pending_acks,x
-        jsr send_ack_for_seq
-        inx
-        jmp @loop
-
-@clear:
+        ; Save count and clear immediately to prevent re-entry issues
+        sta ack_batch_count
         lda #0
         sta pending_ack_count
-@done:
-        rts
 
-;-------------------------------------------------------------------------------
-; Send ACK for sequence number in A
-;-------------------------------------------------------------------------------
-send_ack_for_seq:
-        sta ack_seq_temp     ; Save seq to ACK
+        ; Build all ACK packets into ack_batch_buffer
+        ; Each ACK is 8 bytes: A2 05 01 00 00 seq checksum
+        lda #0
+        sta ack_batch_pos    ; Offset into buffer
+
+        ldx #0               ; Index into pending_acks
+@build_loop:
+        cpx ack_batch_count
+        bcs @send_batch
+
+        ; Get the seq number to ACK
+        lda pending_acks,x
+        sta ack_seq_temp
+
+        ; Build ACK packet at current position
+        ldy ack_batch_pos
 
         lda #A2P_MAGIC_0
-        sta send_buffer
+        sta ack_batch_buffer,y
+        iny
         lda #A2P_MAGIC_1
-        sta send_buffer+1
+        sta ack_batch_buffer,y
+        iny
         lda #PKT_ACK
-        sta send_buffer+2
+        sta ack_batch_buffer,y
+        iny
         lda #1               ; Len = 1
-        sta send_buffer+3
-        lda #0
-        sta send_buffer+4
-        lda #0               ; Seq for ACK packet
-        sta send_buffer+5
-        lda ack_seq_temp     ; ACK this seq
-        sta send_buffer+6
+        sta ack_batch_buffer,y
+        iny
+        lda #0               ; Len high
+        sta ack_batch_buffer,y
+        iny
+        lda #0               ; Seq (ACK packets use seq 0)
+        sta ack_batch_buffer,y
+        iny
+        lda ack_seq_temp     ; Data = seq being ACKed
+        sta ack_batch_buffer,y
+        iny
 
-        ; Checksum
+        ; Checksum: XOR of type, len_lo, len_hi, seq, data
         lda #PKT_ACK
-        eor #1
-        eor #0
-        eor #0
-        eor ack_seq_temp
-        sta send_buffer+7
+        eor #1               ; len_lo
+        eor #0               ; len_hi
+        eor #0               ; seq
+        eor ack_seq_temp     ; data
+        sta ack_batch_buffer,y
+        iny
 
-        lda #8
+        sty ack_batch_pos    ; Update position
+        inx
+        jmp @build_loop
+
+@send_batch:
+        ; Send all ACKs in one tcp_send call
+        lda ack_batch_pos
+        beq @done
         sta tcp_send_data_len
         lda #0
         sta tcp_send_data_len+1
-        ldax #send_buffer
+        ldax #ack_batch_buffer
         jsr tcp_send
-        rts
 
-;-------------------------------------------------------------------------------
-; Send ACK packet (legacy - uses pkt_seq)
-;-------------------------------------------------------------------------------
-send_ack:
-        lda pkt_seq
-        jmp send_ack_for_seq
+@done:
+        rts
 
 ;-------------------------------------------------------------------------------
 ; Send NACK packet
@@ -2031,8 +2133,12 @@ send_nack:
 
 ;-------------------------------------------------------------------------------
 ; Output character with scrolling
+; IMPORTANT: Must preserve Y register (caller uses it as loop index)
 ;-------------------------------------------------------------------------------
 output_char:
+        ; Save Y register first (all paths need it preserved)
+        sty temp2            ; Use temp2 since temp1 may be used by caller
+
         ; Check for newline (CR or LF)
         cmp #$8D             ; CR with high bit
         beq @newline
@@ -2043,9 +2149,7 @@ output_char:
         cmp #$0A             ; LF without high bit
         beq @newline
 
-        ; Save character and Y register
-        pha
-        tya
+        ; Save character
         pha
 
         ; Ensure we're on the output row
@@ -2065,16 +2169,16 @@ output_char:
         sta CH
 
 @print:
-        pla                  ; Restore Y
-        tay
         pla                  ; Restore character
         jsr COUT
+        ldy temp2            ; Restore Y
         rts
 
 @newline:
         jsr do_scroll
         lda #0
         sta CH
+        ldy temp2            ; Restore Y
         rts
 
 ;-------------------------------------------------------------------------------
@@ -2442,13 +2546,13 @@ model_haiku:
         .byte "HAIKU", 0
 
 prompt_str:
-        .byte "CLAUDE> ", 0
+        .byte "AGENT> ", 0
 
 code_prefix:
         .byte "/CODE ", 0
 
 ui_header:
-        .byte "======== CLAUDE AI FOR APPLE II ========", 0
+        .byte "======== APPLE II AI AGENT ========", 0
 
 ui_divider:
         .byte "----------------------------------------", 0
@@ -2589,10 +2693,17 @@ parse_value:    .res 1
 port_lo:        .res 1
 port_hi:        .res 1
 
+; Callback re-entry guard
+in_callback:       .res 1       ; Non-zero if inside recv_callback
+recv_pkt_count:    .res 1       ; Count of callback invocations (debug)
+
 ; Deferred ACK handling (avoid tcp_send during recv_callback)
 pending_ack_count: .res 1       ; Number of pending ACKs
 pending_acks:      .res 8       ; Sequence numbers to ACK
 ack_seq_temp:      .res 1       ; Temp for send_ack_for_seq
+ack_batch_count:   .res 1       ; Number of ACKs to send in batch
+ack_batch_pos:     .res 1       ; Current position in batch buffer
+ack_batch_buffer:  .res 64      ; Buffer for up to 8 ACK packets (8 bytes each)
 
 ; ProDOS I/O buffer (must be page-aligned, 1024 bytes)
 ; Placed in separate IOBUF segment to ensure alignment

@@ -77,10 +77,10 @@ def start(host: str = '0.0.0.0', port: int = 8080) -> dict:
     if not PROXY_SCRIPT.exists():
         return {"success": False, "error": f"Proxy script not found: {PROXY_SCRIPT}"}
 
-    # Start proxy in background
+    # Start proxy in background with unbuffered output
     with open(LOG_FILE, 'w') as log:
         proc = subprocess.Popen(
-            ['python3', str(PROXY_SCRIPT), '--host', host, '--port', str(port)],
+            ['python3', '-u', str(PROXY_SCRIPT), '--host', host, '--port', str(port)],
             stdout=log,
             stderr=subprocess.STDOUT,
             start_new_session=True,

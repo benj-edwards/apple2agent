@@ -545,7 +545,7 @@ Be concise but preserve important technical details."""
             "content": user_message
         })
 
-        system_prompt = """You are Claude Code for Apple II - an expert AI programmer that creates and tests code.
+        system_prompt = """You are Apple II Agent for Apple II - an expert AI programmer that creates and tests code.
 
 CHOOSING LANGUAGE:
 - If user says "BASIC" or doesn't specify: use Applesoft BASIC
@@ -684,8 +684,20 @@ You are the user's AI programming partner. Make it feel magical!"""
                     break
 
             except Exception as e:
-                self.send_status(f"ERROR: {str(e)[:20]}")
-                return f"ERROR: {str(e)}"
+                error_msg = str(e)
+                # Provide clean error messages for common API errors
+                if "credit" in error_msg.lower() or "balance" in error_msg.lower():
+                    self.send_status("NO API CREDITS")
+                    return "ERROR: API CREDITS DEPLETED. ADD CREDITS TO YOUR ANTHROPIC ACCOUNT."
+                elif "rate" in error_msg.lower() and "limit" in error_msg.lower():
+                    self.send_status("RATE LIMITED")
+                    return "ERROR: API RATE LIMIT. PLEASE WAIT A MOMENT."
+                elif "authentication" in error_msg.lower() or "api_key" in error_msg.lower():
+                    self.send_status("BAD API KEY")
+                    return "ERROR: INVALID API KEY. CHECK ANTHROPIC_API_KEY."
+                else:
+                    self.send_status(f"ERROR: {error_msg[:20]}")
+                    return f"ERROR: {error_msg[:100]}"
 
         return "MAX TURNS REACHED"
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Claude Code for Apple II - Web Interface
+Apple II Agent for Apple II - Web Interface
 
-A web-based terminal that provides the same Claude Code experience
+A web-based terminal that provides the same Apple II Agent experience
 as the Apple II client, but from a browser. Still deploys code to
 the real Apple II connected to the proxy.
 
@@ -40,7 +40,7 @@ TERMINAL_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Claude Code for Apple II</title>
+    <title>Apple II Agent for Apple II</title>
     <style>
         * {
             margin: 0;
@@ -163,7 +163,7 @@ TERMINAL_HTML = """
     </div>
 
     <div id="commands">
-        <span>/AGENT - Toggle Claude Code mode</span>
+        <span>/AGENT - Toggle Apple II Agent mode</span>
         <span>/CLEAR - New conversation</span>
         <span>/HELP - All commands</span>
     </div>
@@ -200,7 +200,7 @@ TERMINAL_HTML = """
             appendLine('AI-POWERED PROGRAMMING', 'system-msg');
             appendLine('DESCRIBE WHAT YOU WANT!', 'system-msg');
             appendLine('', 'system-msg');
-            appendLine('Type /AGENT to enable Claude Code mode', 'system-msg');
+            appendLine('Type /AGENT to enable Apple II Agent mode', 'system-msg');
             appendLine('Then describe your program in plain English.', 'system-msg');
             appendLine('', 'system-msg');
             appendLine('Examples:', 'system-msg');
@@ -290,7 +290,7 @@ TERMINAL_HTML = """
 
 
 class WebInterface:
-    """Web interface for Claude Code for Apple II."""
+    """Web interface for Apple II Agent for Apple II."""
 
     def __init__(self, proxy_host: str = 'localhost', proxy_port: int = 8080):
         self.proxy_host = proxy_host
@@ -402,11 +402,11 @@ class WebInterface:
             print("ERROR: Flask not installed. Run: pip install flask")
             return
 
-        print(f"Claude Code for Apple II - Web Interface")
+        print(f"Apple II Agent for Apple II - Web Interface")
         print(f"=========================================")
         print(f"Open http://localhost:{port} in your browser")
         print(f"")
-        print(f"This provides the same Claude Code experience")
+        print(f"This provides the same Apple II Agent experience")
         print(f"as the Apple II client, but from your browser.")
         print(f"Code will still be deployed to your real Apple II!")
         print(f"")
@@ -416,7 +416,7 @@ class WebInterface:
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description='Claude Code for Apple II - Web Interface')
+    parser = argparse.ArgumentParser(description='Apple II Agent for Apple II - Web Interface')
     parser.add_argument('--port', '-p', type=int, default=8081,
                         help='Web server port (default: 8081)')
     parser.add_argument('--host', '-H', default='0.0.0.0',

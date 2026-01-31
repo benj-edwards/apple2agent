@@ -1,7 +1,7 @@
 ;===============================================================================
-; CLAUDE CODE - Apple IIe Terminal Interface
+; APPLE II AGENT - Apple IIe Terminal Interface
 ;
-; A full-screen Claude Code experience for Apple IIe with Uthernet II
+; A full-screen Apple II Agent experience for Apple IIe with Uthernet II
 ;
 ; Features:
 ; - Full-screen terminal UI (40x24)
@@ -14,9 +14,9 @@
 ; Memory Map:
 ;   Main RAM:
 ;     $0801-$5FFF  BASIC program area
-;     $6000-$7FFF  Claude Code main routines (loaded here initially)
+;     $6000-$7FFF  Apple II Agent main routines (loaded here initially)
 ;   Aux RAM:
-;     $6000-$9FFF  Claude Code TSR (copied here, stays resident)
+;     $6000-$9FFF  Apple II Agent TSR (copied here, stays resident)
 ;
 ; Usage:
 ;   1. BRUN CLAUDE.CODE (or -CLAUDE.CODE for ProDOS)
@@ -24,7 +24,7 @@
 ;   3. Type your request at the CLAUDE> prompt
 ;   4. Watch Claude work (streaming output)
 ;   5. Confirm injection, then RUN your program
-;   6. Type & anytime to return to Claude Code
+;   6. Type & anytime to return to Apple II Agent
 ;===============================================================================
 
         .setcpu "6502"
@@ -207,7 +207,7 @@ install_hook:
 ; Ampersand entry point (from BASIC prompt)
 ;-------------------------------------------------------------------------------
 ampersand_entry:
-        ; Check if already in Claude Code
+        ; Check if already in Apple II Agent
         lda in_claude
         bne @exit
 
@@ -226,7 +226,7 @@ ampersand_entry:
         rts
 
 ;-------------------------------------------------------------------------------
-; Main UI - full screen Claude Code interface
+; Main UI - full screen Apple II Agent interface
 ;-------------------------------------------------------------------------------
 main_ui:
         jsr HOME
@@ -1183,7 +1183,7 @@ msg_timeout:
 
 msg_program_ready:
         .byte "PROGRAM LOADED - TYPE RUN", 13
-        .byte "TYPE & FOR CLAUDE CODE", 0
+        .byte "TYPE & FOR APPLE II AGENT", 0
 
 msg_bye:
         .byte "BYE - TYPE & TO RETURN", 0
@@ -1205,7 +1205,7 @@ msg_help:
         .byte " ESC - EXIT TO BASIC", 13, 0
 
 header_line1:
-        .byte "======= CLAUDE CODE FOR APPLE II =======", 0
+        .byte "======= APPLE II AGENT FOR APPLE II =======", 0
 
 header_line2:
         .byte "TYPE REQUEST OR HELP FOR COMMANDS", 0

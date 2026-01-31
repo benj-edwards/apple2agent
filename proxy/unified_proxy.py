@@ -35,6 +35,10 @@ import time
 import re
 from typing import Optional, Callable, Dict
 
+# Force unbuffered output for logging
+sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buffering=1)
+sys.stderr = os.fdopen(sys.stderr.fileno(), 'w', buffering=1)
+
 # Handle imports for both direct execution and module import
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 if _script_dir not in sys.path:
@@ -493,7 +497,7 @@ class AppleIISession:
         if command == 'HELP':
             self._send_response(
                 "/HELP - SHOW COMMANDS\n"
-                "/AGENT - TOGGLE CLAUDE CODE MODE\n"
+                "/AGENT - TOGGLE APPLE II AGENT MODE\n"
                 "/MODEL S|O|H - SET MODEL\n"
                 "/SUSPEND - DROP TO BASIC\n"
                 "/CODE <DESC> - GENERATE BASIC\n"
@@ -639,13 +643,13 @@ class AppleIISession:
         suspend_msg = (
             "\n"
             "================================\n"
-            "   CLAUDE CODE SUSPENDED\n"
+            "   APPLE II AGENT SUSPENDED\n"
             "================================\n"
             "\n"
             "YOUR PROGRAM IS LOADED!\n"
             "TYPE: RUN\n"
             "\n"
-            "TO RESUME CLAUDE CODE:\n"
+            "TO RESUME APPLE II AGENT:\n"
             "  CTRL-C CTRL-C  OR\n"
             "  CALL 24576     (CALL $6000)\n"
             "\n"
@@ -673,7 +677,7 @@ class AppleIISession:
                 )
             welcome = (
                 "================================\n"
-                "    CLAUDE CODE FOR //E\n"
+                "    APPLE II AGENT FOR //E\n"
                 "================================\n"
                 "\n"
                 "AI-POWERED PROGRAMMING\n"
@@ -685,12 +689,12 @@ class AppleIISession:
                 "================================\n"
             )
             self._send_response(welcome)
-            self._send_status("CLAUDE CODE READY")
-            print(f"[Session] Claude Code mode enabled")
+            self._send_status("APPLE II AGENT READY")
+            print(f"[Session] Apple II Agent mode enabled")
         else:
-            self._send_response("CLAUDE CODE OFF\nBACK TO NORMAL CHAT")
+            self._send_response("APPLE II AGENT OFF\nBACK TO NORMAL CHAT")
             self._send_status("CHAT MODE")
-            print(f"[Session] Claude Code mode disabled")
+            print(f"[Session] Apple II Agent mode disabled")
 
     def _agentic_response(self, message: str):
         """Handle message in agentic mode."""
