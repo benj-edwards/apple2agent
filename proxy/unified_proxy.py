@@ -389,6 +389,7 @@ class AppleIISession:
         self.agentic_claude: Optional[AgenticClaude] = None
         self.max_turns = 20  # Max agentic turns
         self.keep_history = True  # Keep conversation history between messages
+        self.final_response_sent = False  # Track if FINAL response already sent
 
     def run(self):
         """Main session loop."""
@@ -476,6 +477,9 @@ class AppleIISession:
         """Handle CHAT packet - user message."""
         message = packet.data.decode('ascii', errors='replace').strip()
         print(f"[Session] Chat: {message}")
+
+        # Reset response tracking for new message
+        self.final_response_sent = False
 
         # Check for special commands
         if message.startswith('/'):
@@ -639,6 +643,7 @@ class AppleIISession:
         packets = create_response_packets(self.proto, text)
         for packet in packets:
             self._send(packet)
+        self.final_response_sent = True  # Mark that FINAL was sent
 
     def _handle_suspend(self):
         """Handle /SUSPEND - drop to BASIC prompt."""
@@ -725,8 +730,9 @@ class AppleIISession:
                 model=model_id,
                 max_turns=self.max_turns
             )
-            # Send final response to Apple II
-            self._send_response(response)
+            # Send final response to Apple II (unless already sent via tool/code)
+            if not self.final_response_sent and response:
+                self._send_response(response)
         except Exception as e:
             self._send_error(f"AGENT ERROR: {str(e)[:50]}")
 
@@ -742,8 +748,8 @@ class AppleIISession:
             for packet in packets:
                 self._send(packet)
                 time.sleep(0.01)
-
-            self._send_status("CODE LOADED - TYPE RUN")
+            # Agent closes after code end marker - mark as final sent
+            self.final_response_sent = True
         except Exception as e:
             self._send_error(f"CODE ERROR: {str(e)[:40]}")
 
