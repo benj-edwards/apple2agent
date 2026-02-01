@@ -241,9 +241,13 @@ start:
         ldax #msg_installed
         jsr print
         jsr print_cr
-        jsr print_cr
 
-        ; Go directly to main UI (or could exit to BASIC here)
+        ; Wait for key so user can see boot info
+        ldax #msg_press_key
+        jsr print
+        jsr RDKEY           ; Wait for any key
+
+        ; Go directly to main UI
         jsr main_ui
 
         ; Return to BASIC when done
@@ -489,6 +493,14 @@ save_config_file:
 ; Main UI
 ;===============================================================================
 main_ui:
+        ; Output 24 CRs to scroll boot text off terminal (for --simple mode)
+        ldx #24
+@clear_term:
+        lda #$8D             ; CR
+        jsr COUT
+        dex
+        bne @clear_term
+
         jsr HOME
         jsr draw_ui
 
@@ -563,6 +575,10 @@ draw_command_area:
         ldax #ui_header
         jsr print_padded_line
 
+        ; CR for terminal mode
+        lda #$8D
+        jsr COUT
+
         ; Separator at line 21
         lda #SEPARATOR_LINE
         sta CV
@@ -571,6 +587,10 @@ draw_command_area:
         sta CH
         ldax #ui_separator
         jsr print_padded_line
+
+        ; CR for terminal mode
+        lda #$8D
+        jsr COUT
 
         ; Fall through to draw input area
 
@@ -588,6 +608,10 @@ draw_input_area:
         jsr CLREOL
         ldax #msg_ready
         jsr print
+
+        ; CR for terminal mode (VTAB doesn't move terminal cursor)
+        lda #$8D
+        jsr COUT
 
         ; Input prompt at line 23
         jsr draw_prompt
@@ -837,6 +861,8 @@ handle_command:
         rts
 
 @quit:
+        ; Disconnect before exiting
+        jsr disconnect
         ; Signal exit (will be handled by main loop)
         pla                  ; Pop return address
         pla
@@ -1235,9 +1261,58 @@ print_model_name:
         rts
 
 ;-------------------------------------------------------------------------------
-; Send chat message to server
+; Send chat message to server (uses persistent connection)
 ;-------------------------------------------------------------------------------
 send_chat:
+        ; Ensure we have a connection
+        jsr ensure_connected
+        bcs @failed
+
+        ; Clear output area for new response
+        jsr clear_output_area
+
+        ; Initialize receive state BEFORE sending (callbacks may trigger)
+        lda #0
+        sta recv_state
+        sta got_code
+        sta code_offset
+        sta code_offset+1
+        sta pending_ack_count
+        sta in_callback
+        lda #<BASIC_START
+        sta dst_ptr
+        lda #>BASIC_START
+        sta dst_ptr+1
+
+        ; Build and send CHAT packet (no INIT needed - sent on connect)
+        jsr send_chat_packet
+        ; Process any incoming data
+        jsr ip65_process
+        jsr ip65_process
+        jsr ip65_process
+
+        ; Wait for response (state already initialized)
+        jsr receive_response_no_init
+
+        ; DON'T close connection - keep it open for next message
+        rts
+
+@failed:
+        jsr status_msg
+        ldax #msg_conn_fail
+        jsr print
+        rts
+
+;-------------------------------------------------------------------------------
+; Ensure connection is established (connect if not connected)
+; Returns: C=0 if connected, C=1 if failed
+;-------------------------------------------------------------------------------
+ensure_connected:
+        ; Check if already connected
+        lda is_connected
+        bne @already_connected
+
+        ; Not connected - establish connection
         jsr status_msg
         ldax #msg_connecting
         jsr print
@@ -1260,85 +1335,50 @@ send_chat:
         lda CONFIG_PORT
         ldx CONFIG_PORT+1
         jsr tcp_connect
-        bcc @connected
+        bcs @connect_failed
+
+        ; Connected! Send INIT packet once
+        lda #1
+        sta is_connected
+
+        jsr send_init_packet
+        jsr ip65_process
+        jsr ip65_process
+        jsr ip65_process
 
         jsr status_msg
-        ldax #msg_conn_fail
+        ldax #msg_connected
         jsr print
+
+@already_connected:
+        clc                  ; Success
         rts
 
-@connected:
-        ; Clear output area for new response
-        jsr clear_output_area
-
-        ; Initialize receive state BEFORE sending (callbacks may trigger)
+@connect_failed:
         lda #0
-        sta recv_state
-        sta got_code
-        sta code_offset
-        sta code_offset+1
-        sta pending_ack_count
-        sta in_callback
-        lda #<BASIC_START
-        sta dst_ptr
-        lda #>BASIC_START
-        sta dst_ptr+1
-
-        ; Build and send INIT packet
-        jsr send_init_packet
-        ; Process any incoming data
-        jsr ip65_process
-        jsr ip65_process
-        jsr ip65_process
-
-        ; Build and send CHAT packet
-        jsr send_chat_packet
-        ; Process any incoming data
-        jsr ip65_process
-        jsr ip65_process
-        jsr ip65_process
-
-        ; Wait for response (state already initialized)
-        jsr receive_response_no_init
-
-        jsr tcp_close
+        sta is_connected
+        sec                  ; Failed
         rts
 
 ;-------------------------------------------------------------------------------
-; Send code request to server
+; Disconnect from server
+;-------------------------------------------------------------------------------
+disconnect:
+        lda is_connected
+        beq @not_connected
+        jsr tcp_close
+        lda #0
+        sta is_connected
+@not_connected:
+        rts
+
+;-------------------------------------------------------------------------------
+; Send code request to server (uses persistent connection)
 ;-------------------------------------------------------------------------------
 send_code_request:
-        jsr status_msg
-        ldax #msg_connecting
-        jsr print
-
-        ldax #recv_callback
-        stax tcp_callback
-
-        ; Connect
-        lda CONFIG_IP
-        sta tcp_connect_ip
-        lda CONFIG_IP+1
-        sta tcp_connect_ip+1
-        lda CONFIG_IP+2
-        sta tcp_connect_ip+2
-        lda CONFIG_IP+3
-        sta tcp_connect_ip+3
-
-        ; Connect using configured port
-        lda CONFIG_PORT
-        ldx CONFIG_PORT+1
-        jsr tcp_connect
-        bcc @connected
-
-        jsr status_msg
-        ldax #msg_conn_fail
-        jsr print
-        rts
-
-@connected:
-        ; INIT
-        jsr send_init_packet
+        ; Ensure we have a connection
+        jsr ensure_connected
+        bcs @failed
 
         ; Send as CHAT with code request prefix
         ; The proxy will detect /CODE in the message
@@ -1349,7 +1389,16 @@ send_code_request:
         sta expecting_code
         jsr receive_response
 
-        jsr tcp_close
+        ; DON'T close - keep connection open
+        jmp @check_code
+
+@failed:
+        jsr status_msg
+        ldax #msg_conn_fail
+        jsr print
+        rts
+
+@check_code:
 
         ; If we got code, offer to inject
         lda got_code
@@ -2619,6 +2668,12 @@ msg_connecting:
 msg_conn_fail:
         .byte "CONNECTION FAILED", 0
 
+msg_connected:
+        .byte "CONNECTED", 0
+
+msg_press_key:
+        .byte "PRESS ANY KEY...", 0
+
 msg_receiving:
         .byte "RECEIVING...", 0
 
@@ -2796,6 +2851,7 @@ in_ui:          .res 1
 col_mode:       .res 1          ; 0=40col, 1=80col
 output_row:     .res 1
 output_col:     .res 1          ; Column position on output line
+is_connected:   .res 1          ; 1=TCP connection open, 0=not connected
 
 ; Protocol state
 tx_seq:         .res 1
