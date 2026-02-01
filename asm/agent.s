@@ -108,6 +108,7 @@ TXTTAB          = $67
 VARTAB          = $69
 ARYTAB          = $6B
 STREND          = $6D
+PRGEND          = $AF           ; End of program pointer (needed for editing)
 BASIC_START     = $0801
 
 ; Text screen
@@ -2519,15 +2520,17 @@ inject_program:
         lda #>BASIC_START
         sta TXTTAB+1
 
-        ; End of program
+        ; End of program - set all required pointers
         lda dst_ptr
         sta VARTAB
         sta ARYTAB
         sta STREND
+        sta PRGEND           ; CRITICAL: needed for BASIC editing to work
         lda dst_ptr+1
         sta VARTAB+1
         sta ARYTAB+1
         sta STREND+1
+        sta PRGEND+1
 
         ; Disable TRON (trace mode) - prevents #nn output during RUN
         lda #0
