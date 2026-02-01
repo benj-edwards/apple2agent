@@ -2154,20 +2154,22 @@ handle_code_chunk:
         rts
 
 ;-------------------------------------------------------------------------------
-; Handle STATUS packet
+; Handle STATUS packet - writes directly to screen line 22 (no scroll)
 ;-------------------------------------------------------------------------------
 handle_status_msg:
-        jsr status_msg       ; Position cursor at STATUS_LINE
+        ; Clear line 22 first
+        jsr status_msg
 
+        ; Write status message directly to screen memory at $750
         ldy #0
 @print:
         cpy pkt_data_pos
         bcs @done
+        cpy #39              ; Limit to 39 chars
+        bcs @done
         lda pkt_buffer,y
-        ora #$80
-        sty temp1            ; Save Y before print_a
-        jsr print_a
-        ldy temp1            ; Restore Y
+        ora #$80             ; Set high bit for Apple II display
+        sta STATUS_LINE_ADDR,y  ; Direct screen write
         iny
         bne @print
 @done:
@@ -2583,10 +2585,25 @@ show_menu:
         rts
 
 ;-------------------------------------------------------------------------------
-; Status message - start new line for terminal mode
+; Status message - position at STATUS_LINE (direct screen memory, no scroll)
+; Line 22 screen memory = $750 (Apple II screen layout)
 ;-------------------------------------------------------------------------------
+STATUS_LINE_ADDR = $750
+
 status_msg:
-        jsr print_cr         ; Move to new line
+        ; Clear line 22 directly (40 spaces)
+        lda #$A0             ; Space with high bit
+        ldx #39
+@clear:
+        sta STATUS_LINE_ADDR,x
+        dex
+        bpl @clear
+        ; Position COUT cursor at line 22, col 0
+        lda #STATUS_LINE
+        sta CV
+        lda #0
+        sta CH
+        jsr VTAB
         rts
 
 ;-------------------------------------------------------------------------------

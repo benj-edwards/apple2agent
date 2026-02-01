@@ -442,29 +442,15 @@ class AgenticClaude:
                     cmd = tool_input.get("command", "")[:20]
                     self.send_status(f"RUNNING: {cmd}...")
                     result = self.mcp_call(mcp_name, tool_input)
-                    # After running, read screen and show to user
                     self.send_status("READING OUTPUT...")
                     screen = self.mcp_call("mcp__apple2-mcp__read_screen", {})
-                    if screen:
-                        # Extract meaningful lines (skip blank lines)
-                        lines = str(screen).split('\n') if screen else []
-                        output_lines = [l.strip() for l in lines if l.strip() and l.strip() != ']']
-                        if output_lines:
-                            # Show first 10 non-blank lines to user
-                            preview = '\n'.join(output_lines[:10])
-                            self.send_to_apple2(f"--- EMULATOR ---\n{preview}\n---")
-                    return str(result)
+                    # Return screen content to Claude for analysis (not shown to user)
+                    return str(result) + "\n\nScreen:\n" + str(screen)
 
                 elif tool_name == "emulator_read_screen":
                     self.send_status("READING SCREEN...")
                     result = self.mcp_call(mcp_name, tool_input)
-                    # Show screen output to user
-                    if result:
-                        lines = str(result).split('\n') if result else []
-                        output_lines = [l.strip() for l in lines if l.strip() and l.strip() != ']']
-                        if output_lines:
-                            preview = '\n'.join(output_lines[:10])
-                            self.send_to_apple2(f"--- EMULATOR ---\n{preview}\n---")
+                    # Return to Claude for analysis (not shown to user)
                     return str(result)
 
                 elif tool_name == "emulator_type":
