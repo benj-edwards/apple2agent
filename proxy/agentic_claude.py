@@ -385,21 +385,25 @@ class AgenticClaude:
                 # Special handling for some tools
                 if tool_name == "emulator_inject_basic":
                     # Need to tokenize first
+                    self.send_status("TOKENIZING BASIC...")
                     source = tool_input.get("source", "")
                     result = self.mcp_call("mcp__apple2-mcp__tokenize", {"source": source})
                     if "error" in str(result).lower():
                         return f"Tokenization error: {result}"
                     # Then inject
+                    self.send_status("INJECTING PROGRAM...")
                     hex_data = result.get("hex", "") if isinstance(result, dict) else str(result)
                     inject_input = {
                         "hex_data": hex_data,
                         "auto_run": tool_input.get("auto_run", False)
                     }
                     result = self.mcp_call("mcp__apple2-mcp__inject_tokenized_basic", inject_input)
+                    self.send_status("PROGRAM LOADED")
                     return str(result)
 
                 elif tool_name == "emulator_capture_graphics":
                     mode = tool_input.get("mode", "gr")
+                    self.send_status(f"CAPTURING {mode.upper()} SCREEN...")
                     if mode == "hgr":
                         result = self.mcp_call("mcp__apple2-mcp__read_hgr_ascii", {})
                     else:
@@ -407,11 +411,42 @@ class AgenticClaude:
                     return str(result)
 
                 elif tool_name == "emulator_boot":
+                    self.send_status("BOOTING EMULATOR...")
                     self.emulator_running = True
                     boot_input = {"machine": "enhanced", "uthernet2": True}
                     if "disk" in tool_input:
                         boot_input["disk"] = tool_input["disk"]
                     result = self.mcp_call(mcp_name, boot_input)
+                    self.send_status("EMULATOR READY")
+                    return str(result)
+
+                elif tool_name == "emulator_run_basic":
+                    cmd = tool_input.get("command", "")[:20]
+                    self.send_status(f"RUNNING: {cmd}...")
+                    result = self.mcp_call(mcp_name, tool_input)
+                    return str(result)
+
+                elif tool_name == "emulator_read_screen":
+                    self.send_status("READING SCREEN...")
+                    result = self.mcp_call(mcp_name, tool_input)
+                    return str(result)
+
+                elif tool_name == "emulator_type":
+                    text = tool_input.get("text", "")[:15]
+                    self.send_status(f"TYPING: {text}...")
+                    result = self.mcp_call(mcp_name, tool_input)
+                    return str(result)
+
+                elif tool_name == "emulator_peek":
+                    addr = tool_input.get("address", 0)
+                    self.send_status(f"PEEK ${addr:04X}...")
+                    result = self.mcp_call(mcp_name, tool_input)
+                    return str(result)
+
+                elif tool_name == "emulator_poke":
+                    addr = tool_input.get("address", 0)
+                    self.send_status(f"POKE ${addr:04X}...")
+                    result = self.mcp_call(mcp_name, tool_input)
                     return str(result)
 
                 else:
@@ -419,12 +454,15 @@ class AgenticClaude:
                     return str(result)
 
             except Exception as e:
+                self.send_status(f"ERROR: {str(e)[:20]}")
                 return f"ERROR: {str(e)}"
 
         # Real Apple II tools (via A2P protocol)
         elif tool_name == "apple2_send_code":
+            self.send_status("DEPLOYING TO APPLE II...")
             source = tool_input.get("source", "")
             self.send_code(source)
+            self.send_status("CODE DEPLOYED!")
             return "Code sent to Apple II"
 
         elif tool_name == "apple2_send_message":
@@ -438,10 +476,12 @@ class AgenticClaude:
             return "Status sent to Apple II"
 
         elif tool_name == "apple2_send_binary":
+            self.send_status("DEPLOYING BINARY...")
             hex_data = tool_input.get("hex_data", "")
             load_addr = tool_input.get("load_address", 0x6000)
             if self.send_binary:
                 self.send_binary(hex_data, load_addr)
+                self.send_status(f"BINARY AT ${load_addr:04X}")
                 return f"Binary sent to Apple II at ${load_addr:04X}"
             else:
                 return "ERROR: Binary send not available"
@@ -453,12 +493,15 @@ class AgenticClaude:
             load_addr = tool_input.get("load_address", 0x6000)
             try:
                 # Assemble the code
+                self.send_status("ASSEMBLING 6502...")
                 result = self.mcp_call("mcp__apple2-mcp__assemble", {
                     "source": source,
                     "load_address": load_addr
                 })
                 if isinstance(result, dict) and "hex" in result:
                     hex_data = result["hex"]
+                    size = len(hex_data.replace(" ", "")) // 2
+                    self.send_status(f"LOADING {size} BYTES...")
                     # Load into emulator memory
                     self.mcp_call("mcp__apple2-mcp__load_binary", {
                         "address": load_addr,
@@ -467,11 +510,13 @@ class AgenticClaude:
                     # Store for later deployment
                     self.last_binary = hex_data
                     self.last_binary_addr = load_addr
-                    size = len(hex_data.replace(" ", "")) // 2
+                    self.send_status(f"ASSEMBLED ${load_addr:04X}")
                     return f"Assembled {size} bytes at ${load_addr:04X}. Use CALL {load_addr} to run."
                 else:
+                    self.send_status("ASSEMBLY FAILED")
                     return f"Assembly error: {result}"
             except Exception as e:
+                self.send_status("ASSEMBLY ERROR")
                 return f"ERROR: {str(e)}"
 
         elif tool_name == "emulator_call":
@@ -479,9 +524,12 @@ class AgenticClaude:
                 return "ERROR: Emulator not available (no MCP connection)"
             address = tool_input.get("address", 0x6000)
             try:
+                self.send_status(f"CALL ${address:04X}...")
                 result = self.mcp_call("mcp__apple2-mcp__call", {"address": address})
+                self.send_status("EXECUTED")
                 return f"Called ${address:04X}: {result}"
             except Exception as e:
+                self.send_status("CALL FAILED")
                 return f"ERROR: {str(e)}"
 
         elif tool_name == "disk_save_basic":
@@ -775,6 +823,10 @@ You are the user's AI programming partner. Make it feel magical!"""
         self.send_status("THINKING...")
 
         for turn in range(max_turns):
+            # Show turn progress
+            if turn > 0:
+                self.send_status(f"TURN {turn+1}/{max_turns}...")
+
             # Check if we need to compact the conversation
             self._compact_conversation(model)
 
@@ -819,8 +871,27 @@ You are the user's AI programming partner. Make it feel magical!"""
                         tool_input = block.input
                         tool_id = block.id
 
-                        # Update status
-                        self.send_status(f"USING: {tool_name.upper()}")
+                        # Update status with friendly name
+                        friendly_names = {
+                            "emulator_boot": "BOOTING EMULATOR",
+                            "emulator_type": "TYPING",
+                            "emulator_read_screen": "READING SCREEN",
+                            "emulator_run_basic": "RUNNING BASIC",
+                            "emulator_inject_basic": "LOADING PROGRAM",
+                            "emulator_capture_graphics": "CAPTURING GRAPHICS",
+                            "emulator_peek": "READING MEMORY",
+                            "emulator_poke": "WRITING MEMORY",
+                            "emulator_assemble": "ASSEMBLING",
+                            "emulator_call": "EXECUTING CODE",
+                            "apple2_send_code": "DEPLOYING CODE",
+                            "apple2_send_binary": "DEPLOYING BINARY",
+                            "apple2_send_message": "SENDING MESSAGE",
+                            "disk_save_basic": "SAVING TO DISK",
+                            "disk_save_binary": "SAVING BINARY",
+                            "disk_list": "LISTING DISK",
+                        }
+                        friendly = friendly_names.get(tool_name, tool_name.upper())
+                        self.send_status(f"{friendly}...")
 
                         assistant_content.append({
                             "type": "tool_use",
