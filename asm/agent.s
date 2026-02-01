@@ -520,6 +520,7 @@ main_ui:
         sta output_row
         lda #0
         sta output_col
+        sta lines_since_pause    ; Reset pagination counter
 
         ; Print header
         ldax #ui_header
@@ -527,10 +528,7 @@ main_ui:
         jsr print_cr
 
 @main_loop:
-        ; Print separator and prompt
-        ldax #ui_separator
-        jsr print
-        jsr print_cr
+        ; Print prompt
         ldax #prompt_str
         jsr print
 
@@ -612,12 +610,11 @@ draw_ui:
         rts
 
 ;-------------------------------------------------------------------------------
-; Draw the full command frame (separator only - called when wrapping)
+; Draw the full command frame (called when wrapping)
+; Now just outputs a blank line (no separator)
 ;-------------------------------------------------------------------------------
 draw_command_area:
-        ; Just output separator line when wrapping
-        ldax #ui_separator
-        jsr print
+        ; Output CR to advance line in terminal mode
         lda #$8D
         jsr COUT
         rts
@@ -2342,8 +2339,19 @@ output_char:
 ; Scroll output area
 ; NOTE: Outputs CR for terminal compatibility (Bobbin --simple mode)
 ; When wrapping to top, redraws command area to ensure it's intact
+; Includes [MORE] pagination for long outputs
 ;-------------------------------------------------------------------------------
 do_scroll:
+        ; Check pagination - pause after LINES_PER_PAGE lines
+        inc lines_since_pause
+        lda lines_since_pause
+        cmp #LINES_PER_PAGE
+        bcc @no_pause
+
+        ; Show [MORE] prompt and wait for key
+        jsr show_more_prompt
+
+@no_pause:
         inc output_row
         lda output_row
         cmp #OUTPUT_END
@@ -2379,6 +2387,56 @@ do_scroll:
         sta CV
         jsr VTAB
         jsr CLREOL
+        rts
+
+;-------------------------------------------------------------------------------
+; Show [MORE] prompt and wait for keypress
+; Resets pagination counter after keypress
+;-------------------------------------------------------------------------------
+show_more_prompt:
+        ; Save cursor position
+        lda CH
+        pha
+        lda CV
+        pha
+
+        ; Print [MORE] at current position
+        ldax #msg_more
+        jsr print
+
+        ; Wait for any key
+        jsr RDKEY
+
+        ; Clear the [MORE] text (backspace over it)
+        lda #$88             ; Backspace
+        jsr COUT
+        jsr COUT
+        jsr COUT
+        jsr COUT
+        jsr COUT
+        jsr COUT             ; 6 backspaces for "[MORE]"
+        ldax #msg_spaces_6
+        jsr print            ; Overwrite with spaces
+
+        ; Backspace again to restore cursor position
+        lda #$88
+        jsr COUT
+        jsr COUT
+        jsr COUT
+        jsr COUT
+        jsr COUT
+        jsr COUT
+
+        ; Restore cursor position
+        pla
+        sta CV
+        jsr VTAB
+        pla
+        sta CH
+
+        ; Reset pagination counter
+        lda #0
+        sta lines_since_pause
         rts
 
 ;-------------------------------------------------------------------------------
@@ -2491,6 +2549,7 @@ clear_output_area:
         sta output_row
         lda #0
         sta output_col
+        sta lines_since_pause    ; Reset pagination counter
 
         ; Clear each line from OUTPUT_START to OUTPUT_END-1
         lda #OUTPUT_START
@@ -2727,6 +2786,12 @@ msg_inject:
 msg_injected:
         .byte "PROGRAM LOADED - TYPE RUN", 0
 
+msg_more:
+        .byte "[MORE]", 0
+
+msg_spaces_6:
+        .byte "      ", 0
+
 msg_current_ip:
         .byte "PROXY IP: ", 0
 
@@ -2890,6 +2955,8 @@ col_mode:       .res 1          ; 0=40col, 1=80col
 output_row:     .res 1
 output_col:     .res 1          ; Column position on output line
 is_connected:   .res 1          ; 1=TCP connection open, 0=not connected
+lines_since_pause: .res 1       ; Lines output since last [MORE] pause
+LINES_PER_PAGE  = 19            ; Lines before showing [MORE]
 
 ; Protocol state
 tx_seq:         .res 1
