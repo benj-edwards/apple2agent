@@ -9,9 +9,10 @@ bobbin/src/bobbin
 # Apple II ROMs (copyrighted - obtain separately)
 bobbin/src/roms/
 
-# Disk images (except templates)
+# Disk images (except important ones)
 disks/*.dsk
 !disks/ProDOS_2_4.dsk
+!disks/agent_contiguous.dsk
 
 # Python
 __pycache__/
@@ -38,5 +39,7 @@ Thumbs.db
 
 # Environment files (API keys)
 .env
-.env.*
 *.env
+# But keep the example
+!.env.example
+!proxy/.env.example
