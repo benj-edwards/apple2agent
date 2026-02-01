@@ -781,14 +781,15 @@ You are the user's AI programming partner. Make it feel magical!"""
             try:
                 # Include Anthropic's native web search tool
                 all_tools = APPLE2_TOOLS + [
-                    {"type": "web_search_20250305", "max_uses": 3}
+                    {"type": "web_search_20250305", "name": "web_search", "max_uses": 3}
                 ]
                 response = self.client.messages.create(
                     model=model,
                     max_tokens=4096,
                     system=system_prompt,
                     tools=all_tools,
-                    messages=self.conversation
+                    messages=self.conversation,
+                    extra_headers={"anthropic-beta": "web-search-2025-03-05"}
                 )
 
                 # Process response
@@ -802,6 +803,16 @@ You are the user's AI programming partner. Make it feel magical!"""
                             "type": "text",
                             "text": block.text
                         })
+
+                    elif block.type == "server_tool_use":
+                        # Server-side web search - handled automatically by API
+                        self.send_status("SEARCHING WEB...")
+                        assistant_content.append(block)
+
+                    elif block.type == "web_search_tool_result":
+                        # Web search results - handled automatically by API
+                        self.send_status("GOT SEARCH RESULTS")
+                        assistant_content.append(block)
 
                     elif block.type == "tool_use":
                         tool_name = block.name
