@@ -123,10 +123,11 @@ WIDTH_80        = 80
 
 ; Screen regions (both modes)
 HEADER_LINE     = 0             ; Header at top
-OUTPUT_START    = 2             ; Output starts at line 2
-OUTPUT_END      = 21            ; Output ends at line 21
-STATUS_LINE     = 22            ; Status messages
-INPUT_LINE      = 23            ; Input at bottom
+OUTPUT_START    = 1             ; Output starts at line 1
+OUTPUT_END      = 20            ; Output ends at line 20
+SEPARATOR_LINE  = 21            ; Separator (fixed)
+STATUS_LINE     = 22            ; Status messages (fixed)
+INPUT_LINE      = 23            ; Input at bottom (fixed)
 HEIGHT          = 24
 
 ;-------------------------------------------------------------------------------
@@ -492,9 +493,8 @@ main_ui:
         jsr draw_ui
 
 @main_loop:
-        ; Position at input line
-        jsr position_input
-        jsr clear_line
+        ; Just redraw input area (not full frame - that causes display issues)
+        jsr draw_input_area
 
         ; Get input
         jsr get_input
@@ -524,6 +524,12 @@ main_ui:
 
 ;-------------------------------------------------------------------------------
 ; Draw the UI
+; Layout:
+;   Line 0:     Header
+;   Lines 1-20: Output area (scrolling)
+;   Line 21:    Separator (fixed)
+;   Line 22:    Status (fixed)
+;   Line 23:    Input prompt (fixed)
 ;-------------------------------------------------------------------------------
 draw_ui:
         ; Initialize output position to first output line
@@ -532,28 +538,58 @@ draw_ui:
         lda #0
         sta output_col
 
-        ; Header
+        ; Header at line 0
         lda #HEADER_LINE
         sta CV
         jsr VTAB
         ldax #ui_header
         jsr print_padded_line
 
-        ; Divider
-        lda #1
+        ; Draw the fixed command area at bottom
+        jsr draw_command_area
+        rts
+
+;-------------------------------------------------------------------------------
+; Draw the full command frame (header + separator + status + input)
+; Called when wrapping to restore the full screen frame
+;-------------------------------------------------------------------------------
+draw_command_area:
+        ; Header at line 0
+        lda #HEADER_LINE
         sta CV
         jsr VTAB
-        ldax #ui_divider
+        lda #0
+        sta CH
+        ldax #ui_header
         jsr print_padded_line
 
-        ; Status line
+        ; Separator at line 21
+        lda #SEPARATOR_LINE
+        sta CV
+        jsr VTAB
+        lda #0
+        sta CH
+        ldax #ui_separator
+        jsr print_padded_line
+
+        ; Fall through to draw input area
+
+;-------------------------------------------------------------------------------
+; Draw just the input area (status + input prompt)
+; Called every main loop iteration - minimal redraw
+;-------------------------------------------------------------------------------
+draw_input_area:
+        ; Status line at 22
         lda #STATUS_LINE
         sta CV
         jsr VTAB
+        lda #0
+        sta CH
+        jsr CLREOL
         ldax #msg_ready
         jsr print
 
-        ; Input line with prompt
+        ; Input prompt at line 23
         jsr draw_prompt
         rts
 
@@ -2216,23 +2252,40 @@ output_char:
 ;-------------------------------------------------------------------------------
 ; Scroll output area
 ; NOTE: Outputs CR for terminal compatibility (Bobbin --simple mode)
+; When wrapping to top, redraws command area to ensure it's intact
 ;-------------------------------------------------------------------------------
 do_scroll:
-        ; Output CR for terminal compatibility
-        ; This ensures the cursor actually moves in --simple mode
-        lda #$8D             ; CR with high bit
-        jsr COUT
-
         inc output_row
         lda output_row
         cmp #OUTPUT_END
-        bcc @no_scroll
+        bcc @no_wrap
+        beq @no_wrap
 
-        ; Need to scroll - simple: reset to top for now
+        ; Wrap to top - don't output CR (would scroll into command area)
         lda #OUTPUT_START
         sta output_row
 
-@no_scroll:
+        ; Redraw command area in case it was damaged
+        jsr draw_command_area
+
+        ; Position at output row
+        lda output_row
+        sta CV
+        jsr VTAB
+        jsr CLREOL
+        rts
+
+@no_wrap:
+        ; Only output CR if cursor is in output area
+        lda CV
+        cmp #OUTPUT_END
+        bcs @position         ; Skip CR if CV >= OUTPUT_END
+
+        ; Output CR for terminal compatibility
+        lda #$8D             ; CR with high bit
+        jsr COUT
+
+@position:
         lda output_row
         sta CV
         jsr VTAB
@@ -2378,19 +2431,34 @@ clear_output_area:
 
 ;-------------------------------------------------------------------------------
 ; Scroll output by one line (simplified)
-; NOTE: Outputs CR for terminal compatibility (Bobbin --simple mode)
+; NOTE: Only outputs CR when cursor is already in output area
+; This prevents scrolling when coming from input line
 ;-------------------------------------------------------------------------------
 scroll_output:
+        inc output_row
+        lda output_row
+        cmp #OUTPUT_END
+        bcc @no_wrap
+        beq @no_wrap
+
+        ; Wrap to top
+        lda #OUTPUT_START
+        sta output_row
+
+        ; Redraw command area
+        jsr draw_command_area
+        jmp @set_pos
+
+@no_wrap:
+        ; Only output CR if cursor is in output area (not at input line)
+        lda CV
+        cmp #OUTPUT_END
+        bcs @set_pos         ; Skip CR if CV >= OUTPUT_END (in command area)
+
         ; Output CR for terminal compatibility
         lda #$8D             ; CR with high bit
         jsr COUT
 
-        inc output_row
-        lda output_row
-        cmp #OUTPUT_END
-        bcc @set_pos
-        lda #OUTPUT_START
-        sta output_row
 @set_pos:
         lda output_row
         sta CV
@@ -2636,6 +2704,9 @@ ui_header:
         .byte "======== APPLE II AI AGENT ========", 0
 
 ui_divider:
+        .byte "----------------------------------------", 0
+
+ui_separator:
         .byte "----------------------------------------", 0
 
 help_text:
