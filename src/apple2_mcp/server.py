@@ -23,7 +23,7 @@ from mcp.types import (
 from .emulator import Emulator, BobbinError
 from .screen import format_screen
 from .encoding import APPLESOFT_TOKENS, detokenize_byte
-from .disktools import DOS33Disk, tokenize_basic
+from .disktools import DOS33Disk, tokenize_basic, detect_disk_format
 from .assembler import assemble, get_template, list_templates
 from . import proxy_control
 
@@ -1698,11 +1698,38 @@ async def _call_tool_impl(name: str, args: dict[str, Any]) -> str:
         program_name = args["program_name"]
         source = args["source"]
 
-        disk = DOS33Disk(disk_filename)
-        sectors = disk.save_basic_program(program_name, source)
-        disk.save()
+        # Auto-detect disk format
+        disk_format = detect_disk_format(disk_filename)
 
-        return f"Saved {program_name.upper()} ({sectors} sectors) to {disk_filename}"
+        if disk_format == 'prodos':
+            # ProDOS: tokenize and use prodos_add
+            tokenized = tokenize_basic(source)
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.bin') as f:
+                f.write(tokenized)
+                temp_path = f.name
+            try:
+                # Use the prodos_add tool - type FC = BAS, aux 0801 = BASIC start
+                tools_dir = Path(__file__).parent.parent.parent / "tools"
+                result = subprocess.run(
+                    ["python3", str(tools_dir / "prodos_add.py"),
+                     disk_filename, temp_path, program_name.upper()[:15], "FC", "0801"],
+                    capture_output=True, text=True
+                )
+                if result.returncode != 0:
+                    return f"Error saving to ProDOS disk: {result.stderr}"
+                return f"Saved {program_name.upper()} to ProDOS disk {disk_filename}"
+            finally:
+                os.unlink(temp_path)
+
+        elif disk_format == 'dos33':
+            # DOS 3.3: use native DOS33Disk
+            disk = DOS33Disk(disk_filename)
+            sectors = disk.save_basic_program(program_name, source)
+            disk.save()
+            return f"Saved {program_name.upper()} ({sectors} sectors) to DOS 3.3 disk {disk_filename}"
+
+        else:
+            return f"Error: Unknown disk format for {disk_filename}. Expected DOS 3.3 or ProDOS."
 
     elif name == "save_file_to_disk":
         disk_filename = args["disk_filename"]
@@ -1716,11 +1743,36 @@ async def _call_tool_impl(name: str, args: dict[str, Any]) -> str:
         with open(bas_filename, 'r') as f:
             source = f.read()
 
-        disk = DOS33Disk(disk_filename)
-        sectors = disk.save_basic_program(program_name, source)
-        disk.save()
+        # Auto-detect disk format
+        disk_format = detect_disk_format(disk_filename)
 
-        return f"Saved {program_name.upper()} ({sectors} sectors) from {bas_filename} to {disk_filename}"
+        if disk_format == 'prodos':
+            # ProDOS: tokenize and use prodos_add - type FC = BAS, aux 0801 = BASIC start
+            tokenized = tokenize_basic(source)
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.bin') as f:
+                f.write(tokenized)
+                temp_path = f.name
+            try:
+                tools_dir = Path(__file__).parent.parent.parent / "tools"
+                result = subprocess.run(
+                    ["python3", str(tools_dir / "prodos_add.py"),
+                     disk_filename, temp_path, program_name.upper()[:15], "FC", "0801"],
+                    capture_output=True, text=True
+                )
+                if result.returncode != 0:
+                    return f"Error saving to ProDOS disk: {result.stderr}"
+                return f"Saved {program_name.upper()} from {bas_filename} to ProDOS disk {disk_filename}"
+            finally:
+                os.unlink(temp_path)
+
+        elif disk_format == 'dos33':
+            disk = DOS33Disk(disk_filename)
+            sectors = disk.save_basic_program(program_name, source)
+            disk.save()
+            return f"Saved {program_name.upper()} ({sectors} sectors) from {bas_filename} to DOS 3.3 disk {disk_filename}"
+
+        else:
+            return f"Error: Unknown disk format for {disk_filename}. Expected DOS 3.3 or ProDOS."
 
     # --- ProDOS Disk Tools ---
     elif name == "prodos_list":

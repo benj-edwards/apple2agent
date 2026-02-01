@@ -60,6 +60,66 @@ BASIC_TOKENS = {
 TOKEN_TO_KEYWORD = {v: k for k, v in BASIC_TOKENS.items()}
 
 
+def detect_disk_format(filename: str) -> str:
+    """
+    Detect disk image format (DOS 3.3 or ProDOS).
+
+    Returns: 'prodos', 'dos33', or 'unknown'
+    """
+    if not os.path.exists(filename):
+        return 'unknown'
+
+    with open(filename, 'rb') as f:
+        data = f.read()
+
+    if len(data) < DISK_SIZE:
+        return 'unknown'
+
+    # Determine if this is a .po (ProDOS order) or .dsk/.do (DOS order) file
+    is_prodos_order = filename.lower().endswith('.po')
+
+    # ProDOS interleave table for DOS-order disks
+    PRODOS_INTERLEAVE = [0, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 15]
+
+    def read_prodos_block(block_num):
+        """Read a ProDOS block accounting for interleaving."""
+        if is_prodos_order:
+            offset = block_num * 512
+            return data[offset:offset + 512]
+        else:
+            # DOS order - need interleaving
+            track = block_num // 8
+            block_in_track = block_num % 8
+            sector1_logical = block_in_track * 2
+            sector2_logical = block_in_track * 2 + 1
+            sector1_physical = PRODOS_INTERLEAVE[sector1_logical]
+            sector2_physical = PRODOS_INTERLEAVE[sector2_logical]
+            offset1 = (track * SECTORS_PER_TRACK + sector1_physical) * BYTES_PER_SECTOR
+            offset2 = (track * SECTORS_PER_TRACK + sector2_physical) * BYTES_PER_SECTOR
+            return data[offset1:offset1+256] + data[offset2:offset2+256]
+
+    # Check for ProDOS: Block 2 is volume directory
+    # Storage type $F (volume header) at offset 4 of block 2
+    block2 = read_prodos_block(2)
+    if len(block2) >= 5:
+        storage_type = (block2[4] >> 4) & 0x0F
+        if storage_type == 0x0F:  # Volume directory header
+            return 'prodos'
+
+    # Check for DOS 3.3: VTOC at track 17, sector 0
+    # VTOC has catalog track at offset 1, catalog sector at offset 2
+    vtoc_offset = ts_to_offset(VTOC_TRACK, VTOC_SECTOR)
+    vtoc = data[vtoc_offset:vtoc_offset + 256]
+    if len(vtoc) >= 56:
+        catalog_track = vtoc[1]
+        catalog_sector = vtoc[2]
+        # Valid DOS 3.3 VTOC has track 17 for catalog and version 3
+        if catalog_track == 17 and 1 <= catalog_sector <= 15:
+            return 'dos33'
+
+    return 'unknown'
+
+
 def ts_to_offset(track: int, sector: int) -> int:
     """Convert track/sector to byte offset in disk image."""
     return (track * SECTORS_PER_TRACK + sector) * BYTES_PER_SECTOR
