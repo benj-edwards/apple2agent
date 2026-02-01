@@ -528,6 +528,9 @@ main_ui:
         jsr print_cr
 
 @main_loop:
+        ; Ensure we're on a new line before prompt
+        jsr print_cr
+
         ; Print prompt
         ldax #prompt_str
         jsr print
@@ -796,6 +799,11 @@ handle_command:
         bne :+
         jmp @ip
 :
+        ; /LIST
+        cmp #'L'
+        bne :+
+        jmp @list
+:
         ; /CODE or /CLEAR (both start with C)
         cmp #'C'
         bne @check_q
@@ -894,6 +902,10 @@ handle_command:
         jsr cmd_ip
         rts
 
+@list:
+        jsr cmd_list
+        rts
+
 @quit:
         ; Disconnect before exiting
         jsr disconnect
@@ -948,6 +960,31 @@ cmd_ip:
         ; (simplified - just show 8080)
         ldax #msg_port_8080
         jsr print
+        jsr print_cr
+        rts
+
+;-------------------------------------------------------------------------------
+; Command: /LIST - Show BASIC program listing
+;-------------------------------------------------------------------------------
+LIST_ROM = $D6A5         ; Applesoft LIST entry point
+LOWTR    = $9B           ; Low line number for LIST range
+LINNUM   = $50           ; Current line number
+
+cmd_list:
+        jsr print_cr
+        jsr print_cr
+
+        ; Set up for LIST all (line 0 to 65535)
+        lda #0
+        sta LOWTR
+        sta LOWTR+1
+        lda #$FF
+        sta LINNUM
+        sta LINNUM+1
+
+        ; Call BASIC LIST routine
+        jsr LIST_ROM
+
         jsr print_cr
         rts
 
