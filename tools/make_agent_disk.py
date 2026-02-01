@@ -545,6 +545,26 @@ def main():
         agent_data = f.read()
     print(f"   AGENT.BIN: {len(agent_data)} bytes")
 
+    # Create STARTUP program (auto-runs AGENT.BIN)
+    # Tokenized: 10 PRINT CHR$(4);"BRUN AGENT.BIN"
+    # Format: [next_ptr lo][next_ptr hi][line_num lo][line_num hi][tokens][00][00 00]
+    startup_tokens = bytearray([
+        0x19, 0x08,  # Next line pointer (0x0801 + 24 = 0x0819)
+        0x0A, 0x00,  # Line number 10
+        0xBA,        # PRINT token
+        0xC7, 0x28,  # CHR$( tokens
+        0x34,        # "4"
+        0x29,        # )
+        0x3B,        # ;
+        0x22,        # "
+        0x42, 0x52, 0x55, 0x4E, 0x20,  # BRUN
+        0x41, 0x47, 0x45, 0x4E, 0x54, 0x2E, 0x42, 0x49, 0x4E,  # AGENT.BIN
+        0x22,        # "
+        0x00,        # End of line
+        0x00, 0x00   # End of program
+    ])
+    print(f"   STARTUP: {len(startup_tokens)} bytes (auto-run)")
+
     # Create fresh disk
     print("\n3. Creating fresh ProDOS disk...")
     disk_data = create_fresh_prodos_disk("AGENT")
@@ -565,9 +585,12 @@ def main():
     success, blocks = add_file_contiguous(disk_data, agent_data, "AGENT.BIN", FILETYPE_BIN, 0x6000)
     print(f"   AGENT.BIN: blocks {blocks[0]}-{blocks[-1] if blocks else 'N/A'}")
 
+    success, blocks = add_file_contiguous(disk_data, bytes(startup_tokens), "STARTUP", FILETYPE_BAS, 0x0801)
+    print(f"   STARTUP: blocks {blocks[0]}-{blocks[-1] if blocks else 'N/A'}")
+
     # Verify contiguous allocation
     print("\n5. Verifying contiguous allocation...")
-    for name in ["PRODOS", "BASIC.SYSTEM", "AGENT.BIN"]:
+    for name in ["PRODOS", "BASIC.SYSTEM", "AGENT.BIN", "STARTUP"]:
         ok, msg = verify_contiguous(disk_data, name)
         status = "OK" if ok else "FAIL"
         print(f"   {name}: {status} - {msg}")
