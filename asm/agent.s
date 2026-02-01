@@ -611,10 +611,12 @@ get_input:
         cmp #$0D
         beq @done
 
-        ; Check Delete/Backspace
-        cmp #$FF
+        ; Check Delete/Backspace (multiple codes for different keyboards)
+        cmp #$FF             ; Apple II DELETE key
         beq @delete
-        cmp #$08
+        cmp #$08             ; ASCII backspace
+        beq @delete
+        cmp #$88             ; Backspace with high bit (terminal)
         beq @delete
 
         ; Printable?
@@ -683,10 +685,12 @@ process_input:
 
 ;-------------------------------------------------------------------------------
 ; Handle slash command
+; NOTE: All comparisons convert to uppercase for case-insensitive matching
 ;-------------------------------------------------------------------------------
 handle_command:
-        ; Get command word
+        ; Get command word and convert to uppercase
         lda input_buffer+1
+        jsr to_upper
 
         ; /HELP
         cmp #'H'
@@ -702,6 +706,7 @@ handle_command:
         cmp #'C'
         bne @check_q
         lda input_buffer+2
+        jsr to_upper
         cmp #'O'
         beq @code
         cmp #'L'
@@ -729,6 +734,7 @@ handle_command:
         cmp #'S'
         bne @check_p
         lda input_buffer+2
+        jsr to_upper
         cmp #'E'
         beq @setip
         cmp #'A'
@@ -773,6 +779,7 @@ handle_command:
         cmp #'P'
         bne @check_m
         lda input_buffer+2
+        jsr to_upper
         cmp #'O'
         bne @unknown
         jsr cmd_port
@@ -1122,7 +1129,8 @@ cmd_model:
         lda input_buffer+7       ; Character after "/MODEL "
         beq @show_current        ; No arg - show current
 
-        ; Check which model
+        ; Check which model (convert to uppercase for case-insensitive)
+        jsr to_upper
         cmp #'S'
         beq @set_sonnet
         cmp #'O'
@@ -2207,8 +2215,14 @@ output_char:
 
 ;-------------------------------------------------------------------------------
 ; Scroll output area
+; NOTE: Outputs CR for terminal compatibility (Bobbin --simple mode)
 ;-------------------------------------------------------------------------------
 do_scroll:
+        ; Output CR for terminal compatibility
+        ; This ensures the cursor actually moves in --simple mode
+        lda #$8D             ; CR with high bit
+        jsr COUT
+
         inc output_row
         lda output_row
         cmp #OUTPUT_END
@@ -2364,8 +2378,13 @@ clear_output_area:
 
 ;-------------------------------------------------------------------------------
 ; Scroll output by one line (simplified)
+; NOTE: Outputs CR for terminal compatibility (Bobbin --simple mode)
 ;-------------------------------------------------------------------------------
 scroll_output:
+        ; Output CR for terminal compatibility
+        lda #$8D             ; CR with high bit
+        jsr COUT
+
         inc output_row
         lda output_row
         cmp #OUTPUT_END
