@@ -237,6 +237,24 @@ start:
         ; Install ampersand hook
         jsr install_hook
 
+        ; Connect to proxy now
+        jsr print_cr
+        ldax #msg_connecting
+        jsr print
+        jsr connect_to_proxy
+        bcs @conn_failed
+
+        ldax #msg_connected_proxy
+        jsr print
+        jsr print_cr
+        jmp @show_instructions
+
+@conn_failed:
+        ldax #msg_conn_fail
+        jsr print
+        jsr print_cr
+
+@show_instructions:
         ; Show instructions
         ldax #msg_installed
         jsr print
@@ -246,6 +264,7 @@ start:
         ldax #msg_press_key
         jsr print
         jsr RDKEY           ; Wait for any key
+        jsr print_cr        ; Line break before UI
 
         ; Go directly to main UI
         jsr main_ui
@@ -493,20 +512,27 @@ save_config_file:
 ; Main UI
 ;===============================================================================
 main_ui:
-        ; Output 24 CRs to scroll boot text off terminal (for --simple mode)
-        ldx #24
-@clear_term:
-        lda #$8D             ; CR
-        jsr COUT
-        dex
-        bne @clear_term
-
+        ; Clear screen and home cursor
         jsr HOME
-        jsr draw_ui
+
+        ; Initialize output tracking
+        lda #OUTPUT_START
+        sta output_row
+        lda #0
+        sta output_col
+
+        ; Print header
+        ldax #ui_header
+        jsr print
+        jsr print_cr
 
 @main_loop:
-        ; Just redraw input area (not full frame - that causes display issues)
-        jsr draw_input_area
+        ; Print separator and prompt
+        ldax #ui_separator
+        jsr print
+        jsr print_cr
+        ldax #prompt_str
+        jsr print
 
         ; Get input
         jsr get_input
@@ -536,85 +562,96 @@ main_ui:
 
 ;-------------------------------------------------------------------------------
 ; Draw the UI
-; Layout:
-;   Line 0:     Header
-;   Lines 1-20: Output area (scrolling)
-;   Line 21:    Separator (fixed)
-;   Line 22:    Status (fixed)
-;   Line 23:    Input prompt (fixed)
+; Uses VTAB for screen buffer + CRs for terminal positioning
 ;-------------------------------------------------------------------------------
 draw_ui:
-        ; Initialize output position to first output line
+        ; Initialize output position
         lda #OUTPUT_START
         sta output_row
         lda #0
         sta output_col
 
-        ; Header at line 0
-        lda #HEADER_LINE
+        ; Position at line 0 for screen buffer
+        lda #0
         sta CV
+        sta CH
         jsr VTAB
-        ldax #ui_header
-        jsr print_padded_line
 
-        ; Draw the fixed command area at bottom
-        jsr draw_command_area
+        ; Print header
+        ldax #ui_header
+        jsr print
+
+        ; CR for terminal
+        lda #$8D
+        jsr COUT
+
+        ; Position at line 21 for screen buffer
+        lda #SEPARATOR_LINE
+        sta CV
+        lda #0
+        sta CH
+        jsr VTAB
+
+        ; Print 20 CRs for terminal (to get from line 1 to line 21)
+        ldx #20
+@blank_lines:
+        lda #$8D
+        jsr COUT
+        dex
+        bne @blank_lines
+
+        ; Print separator
+        ldax #ui_separator
+        jsr print
+
+        ; CR for terminal
+        lda #$8D
+        jsr COUT
+
+        ; Status and prompt will be drawn by main_loop
         rts
 
 ;-------------------------------------------------------------------------------
-; Draw the full command frame (header + separator + status + input)
-; Called when wrapping to restore the full screen frame
+; Draw the full command frame (separator only - called when wrapping)
 ;-------------------------------------------------------------------------------
 draw_command_area:
-        ; Header at line 0
-        lda #HEADER_LINE
-        sta CV
-        jsr VTAB
-        lda #0
-        sta CH
-        ldax #ui_header
-        jsr print_padded_line
-
-        ; CR for terminal mode
-        lda #$8D
-        jsr COUT
-
-        ; Separator at line 21
-        lda #SEPARATOR_LINE
-        sta CV
-        jsr VTAB
-        lda #0
-        sta CH
+        ; Just output separator line when wrapping
         ldax #ui_separator
-        jsr print_padded_line
-
-        ; CR for terminal mode
+        jsr print
         lda #$8D
         jsr COUT
-
-        ; Fall through to draw input area
+        rts
 
 ;-------------------------------------------------------------------------------
 ; Draw just the input area (status + input prompt)
-; Called every main loop iteration - minimal redraw
+; Uses VTAB for screen buffer + CRs for terminal
 ;-------------------------------------------------------------------------------
 draw_input_area:
-        ; Status line at 22
+        ; Position at status line for screen buffer
         lda #STATUS_LINE
         sta CV
-        jsr VTAB
         lda #0
         sta CH
-        jsr CLREOL
+        jsr VTAB
+
+        ; Print status
         ldax #msg_ready
         jsr print
 
-        ; CR for terminal mode (VTAB doesn't move terminal cursor)
+        ; CR for terminal
         lda #$8D
         jsr COUT
 
-        ; Input prompt at line 23
-        jsr draw_prompt
+        ; Position at input line for screen buffer
+        lda #INPUT_LINE
+        sta CV
+        lda #0
+        sta CH
+        jsr VTAB
+
+        ; Print prompt
+        ldax #prompt_str
+        jsr print
         rts
 
 ;-------------------------------------------------------------------------------
@@ -1304,19 +1341,10 @@ send_chat:
         rts
 
 ;-------------------------------------------------------------------------------
-; Ensure connection is established (connect if not connected)
+; Connect to proxy at startup
 ; Returns: C=0 if connected, C=1 if failed
 ;-------------------------------------------------------------------------------
-ensure_connected:
-        ; Check if already connected
-        lda is_connected
-        bne @already_connected
-
-        ; Not connected - establish connection
-        jsr status_msg
-        ldax #msg_connecting
-        jsr print
-
+connect_to_proxy:
         ; Setup TCP callback
         ldax #recv_callback
         stax tcp_callback
@@ -1346,11 +1374,6 @@ ensure_connected:
         jsr ip65_process
         jsr ip65_process
 
-        jsr status_msg
-        ldax #msg_connected
-        jsr print
-
-@already_connected:
         clc                  ; Success
         rts
 
@@ -1358,6 +1381,23 @@ ensure_connected:
         lda #0
         sta is_connected
         sec                  ; Failed
+        rts
+
+;-------------------------------------------------------------------------------
+; Ensure connection is established (silent - reconnect if needed)
+; Returns: C=0 if connected, C=1 if failed
+;-------------------------------------------------------------------------------
+ensure_connected:
+        ; Check if already connected
+        lda is_connected
+        bne @already_connected
+
+        ; Not connected - try to reconnect silently
+        jsr connect_to_proxy
+        rts
+
+@already_connected:
+        clc                  ; Success
         rts
 
 ;-------------------------------------------------------------------------------
@@ -2436,15 +2476,10 @@ show_menu:
         rts
 
 ;-------------------------------------------------------------------------------
-; Status message - position at status line
+; Status message - start new line for terminal mode
 ;-------------------------------------------------------------------------------
 status_msg:
-        lda #STATUS_LINE
-        sta CV
-        jsr VTAB
-        lda #0
-        sta CH               ; Start at column 0
-        jsr CLREOL
+        jsr print_cr         ; Move to new line
         rts
 
 ;-------------------------------------------------------------------------------
@@ -2670,6 +2705,9 @@ msg_conn_fail:
 
 msg_connected:
         .byte "CONNECTED", 0
+
+msg_connected_proxy:
+        .byte "CONNECTED TO PROXY", 0
 
 msg_press_key:
         .byte "PRESS ANY KEY...", 0
