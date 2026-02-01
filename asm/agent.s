@@ -180,6 +180,7 @@ CONFIG_SIZE     = 8
 src_ptr         = $FA           ; Source pointer (2 bytes)
 dst_ptr         = $FC           ; Destination pointer (2 bytes)
 pkt_ptr         = $FE           ; Packet data pointer (2 bytes)
+status_ptr      = $E8           ; Status line string pointer (2 bytes)
 temp1           = $EB           ; Temp variable
 temp2           = $EC           ; Temp variable
 scroll_cnt      = $ED           ; Scroll counter
@@ -917,9 +918,8 @@ handle_command:
         rts
 
 @unknown:
-        jsr status_msg
         ldax #msg_unknown_cmd
-        jsr print
+        jsr print_status
         rts
 
 ;-------------------------------------------------------------------------------
@@ -1079,34 +1079,32 @@ cmd_setip:
         inx
 
 @done_parse:
-        ; Show new IP
-        jsr status_msg
+        ; Show new IP on status line (direct screen writes)
         ldax #msg_ip_set
-        jsr print
+        jsr print_status     ; "IP SET: " - clears line and starts writing
 
         lda CONFIG_IP
-        jsr print_decimal
+        jsr status_decimal
         lda #'.'
-        jsr print_a
+        jsr status_char
         lda CONFIG_IP+1
-        jsr print_decimal
+        jsr status_decimal
         lda #'.'
-        jsr print_a
+        jsr status_char
         lda CONFIG_IP+2
-        jsr print_decimal
+        jsr status_decimal
         lda #'.'
-        jsr print_a
+        jsr status_char
         lda CONFIG_IP+3
-        jsr print_decimal
+        jsr status_decimal
 
         ; Auto-save to disk
         jsr save_config_file
         rts
 
 @invalid:
-        jsr status_msg
         ldax #msg_invalid_ip
-        jsr print
+        jsr print_status
         rts
 
 ;-------------------------------------------------------------------------------
@@ -1203,10 +1201,9 @@ cmd_port:
         lda port_hi
         sta CONFIG_PORT+1
 
-        ; Show new port
-        jsr status_msg
+        ; Show new port on status line (direct screen writes)
         ldax #msg_port_set
-        jsr print
+        jsr print_status     ; "PORT SET: " - clears line
 
         ; Print port (simplified - show if 8080)
         lda CONFIG_PORT
@@ -1216,13 +1213,13 @@ cmd_port:
         cmp #>8080
         bne @show_custom
         ldax #msg_port_8080
-        jsr print
+        jsr status_print     ; Append "8080"
         jmp @auto_save
 
 @show_custom:
-        ; Just show "SET" for custom ports
+        ; Just show "CUSTOM" for custom ports
         ldax #msg_custom
-        jsr print
+        jsr status_print     ; Append "CUSTOM"
 
 @auto_save:
         ; Auto-save to disk
@@ -1230,29 +1227,27 @@ cmd_port:
         rts
 
 @invalid:
-        jsr status_msg
         ldax #msg_invalid_port
-        jsr print
+        jsr print_status
         rts
 
 ;-------------------------------------------------------------------------------
 ; Command: /SAVE - Save config to disk
 ;-------------------------------------------------------------------------------
 cmd_save:
-        jsr status_msg
         ldax #msg_saving
-        jsr print
+        jsr print_status     ; "SAVING CONFIG..." on status line
 
         jsr save_config_file
         bcs @failed
 
         ldax #msg_saved
-        jsr print
+        jsr print_status     ; "SAVED!" on status line
         rts
 
 @failed:
         ldax #msg_save_failed
-        jsr print
+        jsr print_status     ; "SAVE FAILED" on status line
         rts
 
 ;-------------------------------------------------------------------------------
@@ -1290,11 +1285,10 @@ cmd_model:
         sta CONFIG_MODEL
         jsr save_config_file     ; Auto-save
 
-        ; Show confirmation
-        jsr status_msg
+        ; Show confirmation on status line
         ldax #msg_model_set
-        jsr print
-        jsr print_model_name
+        jsr print_status         ; "MODEL: " - clears line
+        jsr status_print_model   ; Append model name
         rts
 
 @show_current:
@@ -1312,7 +1306,7 @@ cmd_model:
         rts
 
 ;-------------------------------------------------------------------------------
-; Print current model name
+; Print current model name (using COUT - for output area)
 ;-------------------------------------------------------------------------------
 print_model_name:
         lda CONFIG_MODEL
@@ -1330,6 +1324,27 @@ print_model_name:
         ldax #model_haiku
 @print:
         jsr print
+        rts
+
+;-------------------------------------------------------------------------------
+; Print model name to status line (using status_print)
+;-------------------------------------------------------------------------------
+status_print_model:
+        lda CONFIG_MODEL
+        cmp #MODEL_OPUS
+        beq @opus
+        cmp #MODEL_HAIKU
+        beq @haiku
+        ; Default: Sonnet
+        ldax #model_sonnet
+        jmp @print
+@opus:
+        ldax #model_opus
+        jmp @print
+@haiku:
+        ldax #model_haiku
+@print:
+        jsr status_print
         rts
 
 ;-------------------------------------------------------------------------------
@@ -1370,9 +1385,8 @@ send_chat:
         rts
 
 @failed:
-        jsr status_msg
         ldax #msg_conn_fail
-        jsr print
+        jsr print_status
         rts
 
 ;-------------------------------------------------------------------------------
@@ -1468,9 +1482,8 @@ send_code_request:
         jmp @check_code
 
 @failed:
-        jsr status_msg
         ldax #msg_conn_fail
-        jsr print
+        jsr print_status
         rts
 
 @check_code:
@@ -1484,9 +1497,8 @@ send_code_request:
 
         jsr inject_program
 
-        jsr status_msg
         ldax #msg_injected
-        jsr print
+        jsr print_status
 
 @no_code:
         rts
@@ -1713,9 +1725,8 @@ receive_response_no_init:
         sta timeout_lo
         sta timeout_hi
 
-        jsr status_msg
         ldax #msg_receiving
-        jsr print
+        jsr print_status
 
 @wait_loop:
         jsr ip65_process
@@ -1739,9 +1750,8 @@ receive_response_no_init:
         jmp @wait_loop       ; No timeout - wait forever
 
         ; Timeout
-        jsr status_msg
         ldax #msg_timeout
-        jsr print
+        jsr print_status
 
 @done:
         rts
@@ -2176,24 +2186,39 @@ handle_status_msg:
         rts
 
 ;-------------------------------------------------------------------------------
-; Handle ERR packet
+; Handle ERR packet - writes to status line 22
 ;-------------------------------------------------------------------------------
 handle_error_msg:
+        ; Clear line 22
         jsr status_msg
-        ldax #msg_error_prefix
-        jsr print
 
+        ; Write "ERROR: " prefix directly
+        ldx #0
+@prefix:
+        lda msg_error_prefix,x
+        beq @msg           ; Null terminator
+        ora #$80
+        sta STATUS_LINE_ADDR,x
+        inx
+        cpx #7             ; "ERROR: " is 7 chars
+        bcc @prefix
+
+@msg:
+        ; Write error message after prefix
         ldy #0
 @print:
         cpy pkt_data_pos
         bcs @done
+        txa
+        cmp #39            ; Total max 39 chars
+        bcs @done
         lda pkt_buffer,y
         ora #$80
-        jsr print_a
+        sta STATUS_LINE_ADDR,x
+        inx
         iny
         bne @print
 @done:
-        jsr print_cr
         rts
 
 ;-------------------------------------------------------------------------------
@@ -2488,9 +2513,8 @@ show_more_prompt:
 ; Prompt to inject program
 ;-------------------------------------------------------------------------------
 prompt_inject:
-        jsr status_msg
         ldax #msg_inject
-        jsr print
+        jsr print_status     ; "INJECT PROGRAM? (Y/N) " on status line
 
 @wait:
         jsr RDKEY
@@ -2598,13 +2622,126 @@ status_msg:
         sta STATUS_LINE_ADDR,x
         dex
         bpl @clear
-        ; Position COUT cursor at line 22, col 0
-        lda #STATUS_LINE
-        sta CV
-        lda #0
-        sta CH
-        jsr VTAB
         rts
+
+;-------------------------------------------------------------------------------
+; Status line routines - write directly to screen memory at line 22 ($750)
+; These routines never use COUT/print, avoiding cursor corruption
+;-------------------------------------------------------------------------------
+
+; Print string to status line (clears first, starts at column 0)
+; Input: AX = pointer to null-terminated string
+print_status:
+        sta status_ptr
+        stx status_ptr+1
+        jsr status_msg       ; Clear line 22
+        lda #0
+        sta status_pos       ; Start at column 0
+        ldy #0
+@loop:
+        lda (status_ptr),y
+        beq @done
+        ldx status_pos
+        cpx #39
+        bcs @done
+        ora #$80
+        sta STATUS_LINE_ADDR,x
+        inc status_pos
+        iny
+        bne @loop
+@done:
+        rts
+
+; Append string to status line (continues from current position)
+; Input: AX = pointer to null-terminated string
+status_print:
+        sta status_ptr
+        stx status_ptr+1
+        ldy #0
+@loop:
+        lda (status_ptr),y
+        beq @done
+        ldx status_pos
+        cpx #39
+        bcs @done
+        ora #$80
+        sta STATUS_LINE_ADDR,x
+        inc status_pos
+        iny
+        bne @loop
+@done:
+        rts
+
+; Append single character to status line
+; Input: A = character (will have high bit set)
+status_char:
+        ldx status_pos
+        cpx #39
+        bcs @done
+        ora #$80
+        sta STATUS_LINE_ADDR,x
+        inc status_pos
+@done:
+        rts
+
+; Append decimal number to status line
+; Input: A = value (0-255)
+status_decimal:
+        sta dec_temp
+        ldx #0               ; Flag: printed something
+
+        ; Hundreds
+        ldy #0
+@hund:
+        lda dec_temp
+        cmp #100
+        bcc @tens
+        sec
+        sbc #100
+        sta dec_temp
+        iny
+        bne @hund
+
+@tens:
+        ; Print hundreds if non-zero
+        cpy #0
+        beq @skip_hund
+        tya
+        ora #'0'
+        jsr status_char
+        ldx #1
+
+@skip_hund:
+        ldy #0
+@tens_loop:
+        lda dec_temp
+        cmp #10
+        bcc @ones
+        sec
+        sbc #10
+        sta dec_temp
+        iny
+        bne @tens_loop
+
+@ones:
+        ; Print tens if hundreds printed or tens > 0
+        cpx #0
+        bne @print_tens
+        cpy #0
+        beq @print_ones
+@print_tens:
+        tya
+        ora #'0'
+        jsr status_char
+
+@print_ones:
+        lda dec_temp
+        ora #'0'
+        jsr status_char
+        rts
+
+dec_temp: .res 1
+status_pos: .res 1           ; Current column on status line
 
 ;-------------------------------------------------------------------------------
 ; Clear output area and reset cursor for new response
