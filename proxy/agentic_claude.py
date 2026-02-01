@@ -26,7 +26,7 @@ except ImportError:
 APPLE2_TOOLS = [
     {
         "name": "emulator_boot",
-        "description": "Start the Bobbin Apple II emulator. Use this before any emulator operations.",
+        "description": "SLOW: Cold boot the emulator. Use emulator_load_env instead for instant start!",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -35,6 +35,15 @@ APPLE2_TOOLS = [
                     "description": "Optional path to disk image to boot"
                 }
             },
+            "required": []
+        }
+    },
+    {
+        "name": "emulator_load_env",
+        "description": "INSTANT: Load pre-saved BASIC environment. Much faster than boot! Use this for testing.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
             "required": []
         }
     },
@@ -368,6 +377,7 @@ class AgenticClaude:
             # Map tool names to MCP tool names
             mcp_map = {
                 "emulator_boot": "mcp__apple2-mcp__boot",
+                "emulator_load_env": "mcp__apple2-mcp__load_basic_env",
                 "emulator_type": "mcp__apple2-mcp__type_text",
                 "emulator_read_screen": "mcp__apple2-mcp__read_screen",
                 "emulator_run_basic": "mcp__apple2-mcp__run_basic",
@@ -382,8 +392,16 @@ class AgenticClaude:
                 return f"ERROR: Unknown emulator tool: {tool_name}"
 
             try:
+                # Handle instant environment loading
+                if tool_name == "emulator_load_env":
+                    self.send_status("LOADING EMULATOR...")
+                    self.emulator_running = True
+                    result = self.mcp_call("mcp__apple2-mcp__load_basic_env", {})
+                    self.send_status("EMULATOR READY")
+                    return "Emulator ready (instant load)"
+
                 # Special handling for some tools
-                if tool_name == "emulator_inject_basic":
+                elif tool_name == "emulator_inject_basic":
                     # Need to tokenize first
                     self.send_status("TOKENIZING BASIC...")
                     source = tool_input.get("source", "")
@@ -424,11 +442,29 @@ class AgenticClaude:
                     cmd = tool_input.get("command", "")[:20]
                     self.send_status(f"RUNNING: {cmd}...")
                     result = self.mcp_call(mcp_name, tool_input)
+                    # After running, read screen and show to user
+                    self.send_status("READING OUTPUT...")
+                    screen = self.mcp_call("mcp__apple2-mcp__read_screen", {})
+                    if screen:
+                        # Extract meaningful lines (skip blank lines)
+                        lines = str(screen).split('\n') if screen else []
+                        output_lines = [l.strip() for l in lines if l.strip() and l.strip() != ']']
+                        if output_lines:
+                            # Show first 10 non-blank lines to user
+                            preview = '\n'.join(output_lines[:10])
+                            self.send_to_apple2(f"--- EMULATOR ---\n{preview}\n---")
                     return str(result)
 
                 elif tool_name == "emulator_read_screen":
                     self.send_status("READING SCREEN...")
                     result = self.mcp_call(mcp_name, tool_input)
+                    # Show screen output to user
+                    if result:
+                        lines = str(result).split('\n') if result else []
+                        output_lines = [l.strip() for l in lines if l.strip() and l.strip() != ']']
+                        if output_lines:
+                            preview = '\n'.join(output_lines[:10])
+                            self.send_to_apple2(f"--- EMULATOR ---\n{preview}\n---")
                     return str(result)
 
                 elif tool_name == "emulator_type":
@@ -746,7 +782,7 @@ Be concise but preserve important technical details."""
             "content": user_message
         })
 
-        system_prompt = """You are Apple II Agent for Apple II - an expert AI programmer that creates and tests code.
+        system_prompt = """You are Apple II Agent - an expert AI programmer that creates code for Apple II.
 
 CHOOSING LANGUAGE:
 - If user says "BASIC" or doesn't specify: use Applesoft BASIC
@@ -754,56 +790,52 @@ CHOOSING LANGUAGE:
 - For games that need speed (shooters, action): suggest assembly
 - For utilities, demos, simple programs: BASIC is fine
 
-WORKFLOW - Follow this pattern for EVERY request:
-1. PLAN: Describe what you'll build (show "PLANNING: <description>")
-2. CODE: Write the program (show "WRITING: <what>")
-3. TEST: Run it in emulator (show "TESTING...")
-4. FIX: If bugs, fix and retest (show "FIXING: <issue>")
-5. DEPLOY: Send to real Apple II (show "DEPLOYING...")
-6. CONFIRM: Tell user it's ready (show "READY!")
+WORKFLOW - SIMPLE vs COMPLEX programs:
 
-DETAILED STATUS UPDATES - User sees these in real-time:
-- "BOOTING EMULATOR..."
-- "PLANNING: SPACE INVADERS IN 6502"
-- "WRITING: SPRITE ROUTINES"
-- "WRITING: COLLISION DETECTION"
-- "ASSEMBLING 847 BYTES..."
-- "TESTING IN EMULATOR..."
-- "BUG: SPRITE FLICKER"
-- "FIXING: DOUBLE BUFFER"
-- "TEST PASSED!"
+FOR SIMPLE PROGRAMS (counting, hello world, basic math, simple loops, INPUT/PRINT):
+1. Write the code
+2. Deploy directly with apple2_send_code - NO EMULATOR NEEDED!
+3. Tell user: "TYPE /EXIT THEN RUN"
+Simple programs don't need testing - just send them!
+
+FOR COMPLEX PROGRAMS (graphics, games, multi-screen, tricky logic, assembly):
+1. Use emulator_load_env (instant!) - NOT emulator_boot (slow!)
+2. Inject and test the code
+3. Read screen to verify output - USER SEES THIS OUTPUT!
+4. Fix bugs if needed
+5. Deploy to Apple II
+6. Tell user it's ready
+
+STATUS UPDATES - User sees these in real-time:
+- "WRITING: COUNTING LOOP"
 - "DEPLOYING TO APPLE II..."
-- "READY! TYPE /SUSPEND THEN CALL 24576"
+- "READY! TYPE /EXIT THEN RUN"
+For complex programs:
+- "LOADING EMULATOR..."
+- "TESTING..."
+- "--- EMULATOR OUTPUT ---" (show what you see!)
+- "TEST PASSED!"
 
 BASIC TOOLS:
-- emulator_inject_basic: Load BASIC program
-- emulator_run_basic: Run BASIC commands
-- apple2_send_code: Deploy BASIC to Apple II
+- apple2_send_code: Deploy BASIC to Apple II (USE THIS FOR SIMPLE PROGRAMS!)
+- emulator_inject_basic: Load BASIC into emulator (for testing)
+- emulator_run_basic: Run BASIC commands in emulator
 
 ASSEMBLY/MACHINE LANGUAGE TOOLS:
 - emulator_assemble: Assemble 6502 code, load into emulator
 - emulator_call: Execute machine code routine
 - apple2_send_binary: Deploy binary to Apple II
 
-COMMON TOOLS:
-- emulator_boot: Start emulator (ALWAYS do first!)
-- emulator_read_screen: Check text output
+EMULATOR TOOLS (only for complex programs!):
+- emulator_load_env: INSTANT emulator ready (use this, not boot!)
+- emulator_boot: SLOW cold boot (avoid unless needed)
+- emulator_read_screen: Check text output - SHOWS OUTPUT TO USER!
 - emulator_capture_graphics: See graphics (gr/hgr)
-- emulator_peek/poke: Debug memory
-- apple2_send_status: Update status line (USE OFTEN!)
-- apple2_send_message: Show text to user
 
-WEB SEARCH:
-You have web search capability - use it to look up Apple II programming info,
-ROM routines, algorithms, code examples, or anything else you need.
-Search results will include citations.
-
-DISK TOOLS (saves to user's disk):
-- disk_save_basic: Save BASIC program to disk (user can load later)
-- disk_save_binary: Save machine code to disk
-- disk_save_text: Save text/data files to disk
-- disk_list: List files on the disk
-Offer to save programs to disk so user can use them later!
+OTHER TOOLS:
+- apple2_send_status: Update status line
+- disk_save_basic: Save program to disk
+- disk_list: List files on disk
 
 6502 ASSEMBLY TIPS (ca65 format):
 - Use .org $6000 for load address
@@ -812,13 +844,13 @@ Offer to save programs to disk so user can use them later!
 - COUT=$FDED, HOME=$FC58, GR=$FB40, HGR=$F3E2
 
 CRITICAL RULES:
-1. ALWAYS boot emulator first
-2. ALWAYS test before deploying
-3. Send status updates for EVERY step
+1. SIMPLE PROGRAMS: Skip emulator! Just deploy with apple2_send_code
+2. COMPLEX PROGRAMS: Use emulator_load_env (instant), not emulator_boot (slow)
+3. When you read emulator screen, the user sees it too!
 4. After deploy: "TYPE /EXIT THEN RUN" (BASIC) or "TYPE /EXIT THEN CALL 24576" (ML)
 5. Keep messages UPPERCASE
 
-You are the user's AI programming partner. Make it feel magical!"""
+You are the user's AI programming partner. Be FAST for simple stuff!"""
 
         self.send_status("THINKING...")
 
@@ -875,7 +907,8 @@ You are the user's AI programming partner. Make it feel magical!"""
                         # Skip showing status for apple2_send_status since it sends its own
                         if tool_name != "apple2_send_status":
                             friendly_names = {
-                                "emulator_boot": "BOOTING EMULATOR",
+                                "emulator_boot": "BOOTING (SLOW)",
+                                "emulator_load_env": "LOADING EMULATOR",
                                 "emulator_type": "TYPING",
                                 "emulator_read_screen": "READING SCREEN",
                                 "emulator_run_basic": "RUNNING BASIC",
