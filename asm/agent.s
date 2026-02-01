@@ -2099,11 +2099,16 @@ handle_code_chunk:
         rts
 
 @check_end:
-        ; DEBUG: Show end marker detected
-        lda #'E'
-        jsr print_a
         ; End of code transfer - inject program into BASIC
         jsr inject_program
+
+        ; Show completion message with instructions
+        jsr print_cr
+        jsr print_cr
+        ldax #msg_code_ready
+        jsr print
+        jsr print_cr
+
         lda #1
         sta got_code
         lda #STATE_DONE
@@ -2487,6 +2492,10 @@ inject_program:
         sta ARYTAB+1
         sta STREND+1
 
+        ; Disable TRON (trace mode) - prevents #nn output during RUN
+        lda #0
+        sta $F2              ; TRCFLG - BASIC trace flag
+
         rts
 
 ;-------------------------------------------------------------------------------
@@ -2785,6 +2794,11 @@ msg_inject:
 
 msg_injected:
         .byte "PROGRAM LOADED - TYPE RUN", 0
+
+msg_code_ready:
+        .byte "PROGRAM READY!", $8D
+        .byte "/LIST TO VIEW  /EXIT THEN RUN", $8D
+        .byte "RESUME: & OR CTRL-Y", 0
 
 msg_more:
         .byte "[MORE]", 0
