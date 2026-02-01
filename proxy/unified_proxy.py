@@ -461,17 +461,25 @@ class AppleIISession:
 
         # Initialize agentic Claude if agentic mode is on by default
         if self.agentic_mode and not self.agentic_claude:
-            # Use a no-op status function to avoid overwhelming Apple II
-            # Status updates crash the Apple II when sent rapidly
-            def noop_status(msg): pass
+            # Create throttled status function - max 1 update per 0.3 seconds
+            self._last_status_time = 0
+            self._last_status_msg = ""
+            def throttled_status(msg):
+                now = time.time()
+                # Always send if message is different and at least 0.3s passed
+                if msg != self._last_status_msg and (now - self._last_status_time) >= 0.3:
+                    self._send_status(msg)
+                    self._last_status_time = now
+                    self._last_status_msg = msg
+
             self.agentic_claude = AgenticClaude(
                 send_to_apple2=self._send_response,
-                send_status=noop_status,  # Disabled - crashes Apple II
+                send_status=throttled_status,  # Throttled to prevent crashes
                 send_code=self._send_basic_code,
                 mcp_call=self.mcp_call,
                 send_binary=self._send_binary_code
             )
-            print(f"[Session] Agentic Claude initialized (status disabled)")
+            print(f"[Session] Agentic Claude initialized (throttled status)")
 
     def _handle_chat(self, packet: Packet):
         """Handle CHAT packet - user message."""
@@ -678,9 +686,19 @@ class AppleIISession:
         if self.agentic_mode:
             # Initialize agentic Claude if needed
             if not self.agentic_claude:
+                # Create throttled status function
+                self._last_status_time = 0
+                self._last_status_msg = ""
+                def throttled_status(msg):
+                    now = time.time()
+                    if msg != self._last_status_msg and (now - self._last_status_time) >= 0.3:
+                        self._send_status(msg)
+                        self._last_status_time = now
+                        self._last_status_msg = msg
+
                 self.agentic_claude = AgenticClaude(
                     send_to_apple2=self._send_response,
-                    send_status=self._send_status,
+                    send_status=throttled_status,
                     send_code=self._send_basic_code,
                     mcp_call=self.mcp_call,
                     send_binary=self._send_binary_code
