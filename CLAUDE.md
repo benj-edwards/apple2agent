@@ -399,11 +399,24 @@ tools/prodos_disk.py     # Reference library (not used by CLI)
 
 | Command | Description |
 |---------|-------------|
+| `/EXIT` | **Drop to BASIC to run your program** (or `/SUSPEND`) |
 | `/AGENT` | Toggle agentic mode OFF (it's ON by default) |
 | `/CLEAR` | Clear conversation history |
 | `/MODEL S/O/H` | Set model (Sonnet/Opus/Haiku) |
 | `/IP` | Show proxy IP |
+| `/SETIP x.x.x.x` | Set proxy IP address |
+| `/PORT xxxx` | Set proxy port (default: 8080) |
 | `/HELP` | Show commands |
+
+### Workflow: Running Generated Code
+
+```
+1. AGENT> make a hello world     → Code generated and injected
+2. AGENT> /EXIT                  → Drops to BASIC ]
+3. ] RUN                         → Program runs!
+4. ] &                           → Returns to AGENT> (or Ctrl-Y)
+5. AGENT>                        → Ready for next request
+```
 
 ## A2P Protocol
 
@@ -448,16 +461,14 @@ Needs testing:
 - **Agent network connection** - agent connects to proxy at configured IP, test with `/SETIP`
 
 Known issues:
-- **Agentic mode code injection** - fix in `asm/agent.s` needs testing (dst_ptr init at offset=0)
-- Connection drops after first response (timeout handling)
 - **Agent default IP** - defaults to 192.168.64.1, use `/SETIP x.x.x.x` to set correct host IP
 
-## Ready to Deploy
+## Working Features (Jan 31, 2026)
 
-The fix for agentic mode code injection is in `asm/agent.s`:
-- `handle_code_chunk` now initializes `dst_ptr` to `BASIC_START` when offset=0
-- `inject_program` is called when end marker received to update BASIC pointers
-- Build with `make agent` - file is at `build/AGENT.BIN`
+- **Code injection works!** - ask for any program, code is tokenized and injected
+- **`/SUSPEND` command** - drops to BASIC so you can `RUN` your program
+- **Return hooks** - type `&` or press Ctrl-Y at BASIC prompt to return to agent
+- **Double-response bug fixed** - no more connection resets after code injection
 
 ## NEVER FORGET
 

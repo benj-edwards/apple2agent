@@ -623,7 +623,7 @@ class AppleIISession:
         try:
             self.sock.sendall(packet)
             print(f"[Session] -> sent {len(packet)} bytes: {packet[:20].hex()}...")
-            time.sleep(0.2)  # Throttle ALL sends - Apple II needs time to process
+            time.sleep(0.05)  # Throttle sends - Apple II needs time to process
         except (BrokenPipeError, ConnectionResetError) as e:
             print(f"[Session] Send error: {e}")
             self.running = False
@@ -748,7 +748,7 @@ class AppleIISession:
             for packet in packets:
                 self._send(packet)
                 time.sleep(0.01)
-            # Agent closes after code end marker - mark as final sent
+            # Mark as final sent so we don't send duplicate response
             self.final_response_sent = True
         except Exception as e:
             self._send_error(f"CODE ERROR: {str(e)[:40]}")

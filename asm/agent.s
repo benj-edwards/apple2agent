@@ -99,8 +99,9 @@ MODEL_SONNET    = 0
 MODEL_OPUS      = 1
 MODEL_HAIKU     = 2
 
-; Ampersand hook
-AMPER_VECTOR    = $03F5
+; BASIC hooks
+AMPER_VECTOR    = $03F5         ; & hook vector
+CTRLY_VECTOR    = $03F8         ; Ctrl-Y hook vector
 
 ; BASIC memory
 TXTTAB          = $67
@@ -689,12 +690,14 @@ handle_command:
 
         ; /HELP
         cmp #'H'
-        beq @help
-
+        bne :+
+        jmp @help
+:
         ; /IP
         cmp #'I'
-        beq @ip
-
+        bne :+
+        jmp @ip
+:
         ; /CODE or /CLEAR (both start with C)
         cmp #'C'
         bne @check_q
@@ -718,7 +721,11 @@ handle_command:
         cmp #'Q'
         beq @quit
 
-        ; /SETIP or /SAVE
+        ; /EXIT (alias for /SUSPEND)
+        cmp #'E'
+        beq @suspend
+
+        ; /SETIP, /SAVE, or /SUSPEND
         cmp #'S'
         bne @check_p
         lda input_buffer+2
@@ -726,6 +733,8 @@ handle_command:
         beq @setip
         cmp #'A'
         beq @save
+        cmp #'U'
+        beq @suspend
         jmp @unknown
 
 @setip:
@@ -735,6 +744,29 @@ handle_command:
 @save:
         jsr cmd_save
         rts
+
+@suspend:
+        ; Install hooks so user can return to agent
+        ; Ctrl-Y hook: JMP start
+        lda #$4C             ; JMP opcode
+        sta CTRLY_VECTOR
+        lda #<start
+        sta CTRLY_VECTOR+1
+        lda #>start
+        sta CTRLY_VECTOR+2
+        ; & hook: JMP start
+        lda #$4C             ; JMP opcode
+        sta AMPER_VECTOR
+        lda #<start
+        sta AMPER_VECTOR+1
+        lda #>start
+        sta AMPER_VECTOR+2
+
+        ; Show message and drop to BASIC
+        jsr HOME
+        ldax #msg_suspended
+        jsr print
+        jmp $E003            ; BASIC warm start (]) - no return
 
 @check_p:
         ; /PORT
@@ -2559,6 +2591,13 @@ msg_model_options:
         .byte "/MODEL O - OPUS (SMARTEST)", 13
         .byte "/MODEL H - HAIKU (FASTEST)", 13, 0
 
+msg_suspended:
+        .byte 13
+        .byte "SUSPENDED TO BASIC.", 13
+        .byte "YOUR CODE IS LOADED - TYPE RUN", 13
+        .byte 13
+        .byte "TO RESUME: CTRL-Y OR &", 13, 0
+
 model_sonnet:
         .byte "SONNET", 0
 
@@ -2581,15 +2620,16 @@ ui_divider:
         .byte "----------------------------------------", 0
 
 help_text:
-        .byte "/HELP  - SHOW COMMANDS", 13
-        .byte "/IP    - SHOW PROXY IP", 13
-        .byte "/SETIP - SET PROXY IP", 13
-        .byte "/PORT  - SET PORT", 13
-        .byte "/MODEL - SET AI MODEL", 13
-        .byte "/SAVE  - SAVE CONFIG", 13
-        .byte "/CODE  - GENERATE BASIC", 13
-        .byte "/CLEAR - CLEAR SCREEN", 13
-        .byte "ESC    - MENU", 13, 0
+        .byte "/HELP    - SHOW COMMANDS", 13
+        .byte "/EXIT    - DROP TO BASIC", 13
+        .byte "/IP      - SHOW PROXY IP", 13
+        .byte "/SETIP   - SET PROXY IP", 13
+        .byte "/PORT    - SET PORT", 13
+        .byte "/MODEL   - SET AI MODEL", 13
+        .byte "/SAVE    - SAVE CONFIG", 13
+        .byte "/CODE    - GENERATE BASIC", 13
+        .byte "/CLEAR   - CLEAR SCREEN", 13
+        .byte "ESC      - MENU", 13, 0
 
 menu_text:
         .byte "======== MENU ========", 13
