@@ -9,6 +9,7 @@ This allows the proxy to run the agentic loop without the MCP server.
 """
 
 import os
+import signal
 import sys
 import subprocess
 import time
@@ -19,6 +20,31 @@ from typing import Any, Optional
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from apple2_mcp.control_socket import BobbinControlSocket, ControlSocketError
+
+# PID file for tracking emulator (separate from MCP server's)
+BRIDGE_PID_FILE = "/tmp/bobbin_bridge.pid"
+
+
+def _kill_stale_bobbin():
+    """Kill any stale Bobbin process from PID file."""
+    if os.path.exists(BRIDGE_PID_FILE):
+        try:
+            with open(BRIDGE_PID_FILE, 'r') as f:
+                pid = int(f.read().strip())
+            os.kill(pid, 0)  # Check if exists
+            try:
+                os.kill(pid, signal.SIGTERM)
+                time.sleep(0.5)
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        except (ValueError, ProcessLookupError, FileNotFoundError, PermissionError):
+            pass
+        finally:
+            try:
+                os.remove(BRIDGE_PID_FILE)
+            except OSError:
+                pass
 
 # Also need the tokenizer
 sys.path.insert(0, os.path.dirname(__file__))
@@ -63,6 +89,9 @@ class EmulatorBridge:
         if self.bobbin_process:
             self.shutdown()
 
+        # Kill any stale emulator from previous sessions
+        _kill_stale_bobbin()
+
         # Remove old socket
         if os.path.exists(self.socket_path):
             os.remove(self.socket_path)
@@ -90,6 +119,13 @@ class EmulatorBridge:
             stderr=subprocess.DEVNULL,
             start_new_session=True
         )
+
+        # Track PID for cleanup on restart
+        try:
+            with open(BRIDGE_PID_FILE, 'w') as f:
+                f.write(str(self.bobbin_process.pid))
+        except OSError:
+            pass
 
         # Wait for socket
         self.sock = BobbinControlSocket(self.socket_path)
@@ -120,6 +156,12 @@ class EmulatorBridge:
             self.bobbin_process = None
 
         self.emulator_running = False
+
+        # Clean up PID file
+        try:
+            os.remove(BRIDGE_PID_FILE)
+        except OSError:
+            pass
 
         if os.path.exists(self.socket_path):
             try:

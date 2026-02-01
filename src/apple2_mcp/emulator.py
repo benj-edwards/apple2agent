@@ -13,6 +13,7 @@ Provides methods for:
 
 from __future__ import annotations
 
+import atexit
 import os
 import re
 import signal
@@ -27,8 +28,52 @@ from pexpect import popen_spawn
 from .screen import decode_screen, SCREEN_LINE_ADDRESSES, SCREEN_WIDTH, SCREEN_HEIGHT
 from .control_socket import BobbinControlSocket, ControlSocketError
 
+# PID file for tracking emulator process
+BOBBIN_PID_FILE = "/tmp/bobbin.pid"
+
 # Path where Bobbin writes screen dump on SIGUSR1
 SIGUSR1_SCREEN_PATH = "/tmp/bobbin_screen.txt"
+
+
+def _kill_stale_bobbin():
+    """Kill any stale Bobbin process from PID file."""
+    if os.path.exists(BOBBIN_PID_FILE):
+        try:
+            with open(BOBBIN_PID_FILE, 'r') as f:
+                pid = int(f.read().strip())
+            # Check if process exists
+            os.kill(pid, 0)
+            # Process exists, try graceful then forceful kill
+            try:
+                os.kill(pid, signal.SIGTERM)
+                time.sleep(0.5)
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # Already dead
+        except (ValueError, ProcessLookupError, FileNotFoundError, PermissionError):
+            pass  # PID invalid or process doesn't exist
+        finally:
+            try:
+                os.remove(BOBBIN_PID_FILE)
+            except OSError:
+                pass
+
+
+def _write_pid_file(pid: int):
+    """Write PID file for tracking."""
+    try:
+        with open(BOBBIN_PID_FILE, 'w') as f:
+            f.write(str(pid))
+    except OSError:
+        pass  # Non-fatal
+
+
+def _remove_pid_file():
+    """Remove PID file."""
+    try:
+        os.remove(BOBBIN_PID_FILE)
+    except OSError:
+        pass
 
 # Default control socket path
 DEFAULT_CONTROL_SOCKET = "/tmp/bobbin.sock"
@@ -110,6 +155,9 @@ class Emulator:
         if self.is_running:
             self.shutdown()
 
+        # Kill any stale emulator from previous sessions
+        _kill_stale_bobbin()
+
         self.machine_type = machine
 
         # Build command
@@ -135,6 +183,9 @@ class Emulator:
             ignore_sighup=True,
         )
         self.process.setecho(False)
+
+        # Track PID for cleanup on restart
+        _write_pid_file(self.process.pid)
 
         # Wait for the BASIC prompt (] at start of line) if requested
         # Use \n] pattern to match the actual BASIC prompt, not ] in Bobbin banner
@@ -204,6 +255,9 @@ class Emulator:
                     self.process.terminate(force=True)
                 self.process = None
                 self.in_debugger = False
+
+        # Clean up PID file
+        _remove_pid_file()
 
     def enter_debugger(self, timeout: float = 2.0, max_retries: int = 3) -> bool:
         """Enter the Bobbin debugger (Ctrl-C twice).
