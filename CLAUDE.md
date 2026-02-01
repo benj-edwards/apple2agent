@@ -461,14 +461,18 @@ Needs testing:
 - **Agent network connection** - agent connects to proxy at configured IP, test with `/SETIP`
 
 Known issues:
-- **Agent default IP** - defaults to 192.168.64.1, use `/SETIP x.x.x.x` to set correct host IP
+- **Agent default IP** - defaults to 192.168.64.1, use `/SETIP 192.168.65.1` for Bobbin emulator
 
 ## Working Features (Jan 31, 2026)
 
 - **Code injection works!** - ask for any program, code is tokenized and injected
-- **`/SUSPEND` command** - drops to BASIC so you can `RUN` your program
+- **`/EXIT` command** - drops to BASIC so you can `RUN` your program (also `/SUSPEND`)
 - **Return hooks** - type `&` or press Ctrl-Y at BASIC prompt to return to agent
 - **Double-response bug fixed** - no more connection resets after code injection
+- **TCP connection reuse fixed** - multiple requests now work (Bobbin virtual bridge fix)
+- **Disk format auto-detection** - `save_basic_to_disk` works with both ProDOS and DOS 3.3
+- **Web search** - Anthropic native web search tool for looking up Apple II info
+- **Disk save tools** - `disk_save_basic`, `disk_save_binary`, `disk_save_text` in agentic mode
 
 ## NEVER FORGET
 
