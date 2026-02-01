@@ -240,6 +240,101 @@ APPLE2_TOOLS = [
             },
             "required": ["hex_data"]
         }
+    },
+    {
+        "name": "web_search",
+        "description": "Search the web for information. Use this to look up Apple II programming references, find code examples, research algorithms, or get any information needed to complete the user's request.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query"
+                }
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "web_fetch",
+        "description": "Fetch and read content from a URL. Use this to read documentation, code examples, or reference material from the web.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "URL to fetch"
+                }
+            },
+            "required": ["url"]
+        }
+    },
+    {
+        "name": "disk_save_basic",
+        "description": "Save a BASIC program to disk. The program will be tokenized and saved so the user can BLOAD or RUN it later. Requires user permission.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filename": {
+                    "type": "string",
+                    "description": "Filename on disk (max 15 chars, will be uppercased)"
+                },
+                "source": {
+                    "type": "string",
+                    "description": "BASIC source code with line numbers"
+                }
+            },
+            "required": ["filename", "source"]
+        }
+    },
+    {
+        "name": "disk_save_binary",
+        "description": "Save a binary file to disk. Use this to save assembled machine code. Requires user permission.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filename": {
+                    "type": "string",
+                    "description": "Filename on disk (max 15 chars, will be uppercased)"
+                },
+                "hex_data": {
+                    "type": "string",
+                    "description": "Binary data as hex string"
+                },
+                "load_address": {
+                    "type": "integer",
+                    "description": "Load address for the binary (default: $6000)"
+                }
+            },
+            "required": ["filename", "hex_data"]
+        }
+    },
+    {
+        "name": "disk_save_text",
+        "description": "Save a text file to disk. Use this to save documentation, data files, or source code. Requires user permission.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filename": {
+                    "type": "string",
+                    "description": "Filename on disk (max 15 chars, will be uppercased)"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Text content to save"
+                }
+            },
+            "required": ["filename", "content"]
+        }
+    },
+    {
+        "name": "disk_list",
+        "description": "List files on the current disk. Shows filename, type, and size.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
     }
 ]
 
@@ -417,6 +512,134 @@ class AgenticClaude:
             except Exception as e:
                 return f"ERROR: {str(e)}"
 
+        elif tool_name == "web_search":
+            query = tool_input.get("query", "")
+            try:
+                import urllib.request
+                import urllib.parse
+                import json
+                # Use DuckDuckGo instant answer API (no API key needed)
+                encoded = urllib.parse.quote(query)
+                url = f"https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1"
+                req = urllib.request.Request(url, headers={'User-Agent': 'Apple2Agent/1.0'})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode('utf-8'))
+                # Extract useful info
+                results = []
+                if data.get('Abstract'):
+                    results.append(f"Summary: {data['Abstract']}")
+                if data.get('AbstractSource'):
+                    results.append(f"Source: {data['AbstractSource']}")
+                for topic in data.get('RelatedTopics', [])[:5]:
+                    if isinstance(topic, dict) and topic.get('Text'):
+                        results.append(f"- {topic['Text'][:200]}")
+                if results:
+                    return "\n".join(results)
+                else:
+                    return f"No instant results for '{query}'. Try a more specific query or use web_fetch with a known URL."
+            except Exception as e:
+                return f"Search error: {str(e)}"
+
+        elif tool_name == "web_fetch":
+            url = tool_input.get("url", "")
+            try:
+                import urllib.request
+                req = urllib.request.Request(url, headers={'User-Agent': 'Apple2Agent/1.0'})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    content = resp.read().decode('utf-8', errors='replace')
+                # Truncate if too long
+                if len(content) > 10000:
+                    content = content[:10000] + "\n... (truncated)"
+                return content
+            except Exception as e:
+                return f"Fetch error: {str(e)}"
+
+        elif tool_name == "disk_save_basic":
+            filename = tool_input.get("filename", "PROGRAM").upper()[:15]
+            source = tool_input.get("source", "")
+            # Notify user we're saving to disk
+            self.send_status(f"SAVING {filename} TO DISK...")
+            try:
+                # Use the MCP tool if available
+                if self.mcp_call:
+                    result = self.mcp_call("mcp__apple2-mcp__save_basic_to_disk", {
+                        "disk_filename": "disks/agent_contiguous.dsk",
+                        "program_name": filename,
+                        "source": source
+                    })
+                    return f"Saved BASIC program '{filename}' to disk. User can BRUN {filename} or - {filename}"
+                else:
+                    return "ERROR: Disk operations not available (no MCP connection)"
+            except Exception as e:
+                return f"Disk save error: {str(e)}"
+
+        elif tool_name == "disk_save_binary":
+            filename = tool_input.get("filename", "PROGRAM").upper()[:15]
+            hex_data = tool_input.get("hex_data", "")
+            load_addr = tool_input.get("load_address", 0x6000)
+            self.send_status(f"SAVING {filename} TO DISK...")
+            try:
+                if self.mcp_call:
+                    # First write hex to temp file, then add to disk
+                    import tempfile
+                    hex_clean = hex_data.replace(" ", "").replace("\n", "")
+                    binary = bytes.fromhex(hex_clean)
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.bin') as f:
+                        f.write(binary)
+                        temp_path = f.name
+                    result = self.mcp_call("mcp__apple2-mcp__prodos_add", {
+                        "disk": "disks/agent_contiguous.dsk",
+                        "file": temp_path,
+                        "name": filename,
+                        "type": "BIN",
+                        "addr": f"{load_addr:04X}"
+                    })
+                    import os
+                    os.unlink(temp_path)
+                    return f"Saved binary '{filename}' to disk at ${load_addr:04X}. User can BRUN {filename}"
+                else:
+                    return "ERROR: Disk operations not available (no MCP connection)"
+            except Exception as e:
+                return f"Disk save error: {str(e)}"
+
+        elif tool_name == "disk_save_text":
+            filename = tool_input.get("filename", "FILE").upper()[:15]
+            content = tool_input.get("content", "")
+            self.send_status(f"SAVING {filename} TO DISK...")
+            try:
+                if self.mcp_call:
+                    import tempfile
+                    # Convert to Apple II text (CR line endings, high bit set)
+                    apple_text = content.replace("\n", "\r").upper()
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.txt', mode='w') as f:
+                        f.write(apple_text)
+                        temp_path = f.name
+                    result = self.mcp_call("mcp__apple2-mcp__prodos_add", {
+                        "disk": "disks/agent_contiguous.dsk",
+                        "file": temp_path,
+                        "name": filename,
+                        "type": "TXT"
+                    })
+                    import os
+                    os.unlink(temp_path)
+                    return f"Saved text file '{filename}' to disk."
+                else:
+                    return "ERROR: Disk operations not available (no MCP connection)"
+            except Exception as e:
+                return f"Disk save error: {str(e)}"
+
+        elif tool_name == "disk_list":
+            try:
+                if self.mcp_call:
+                    result = self.mcp_call("mcp__apple2-mcp__prodos_list", {
+                        "disk": "disks/agent_contiguous.dsk"
+                    })
+                    return str(result)
+                else:
+                    return "ERROR: Disk operations not available (no MCP connection)"
+            except Exception as e:
+                return f"Disk list error: {str(e)}"
+
         else:
             return f"ERROR: Unknown tool: {tool_name}"
 
@@ -592,6 +815,18 @@ COMMON TOOLS:
 - apple2_send_status: Update status line (USE OFTEN!)
 - apple2_send_message: Show text to user
 
+RESEARCH TOOLS:
+- web_search: Search the web for Apple II programming info, algorithms, examples
+- web_fetch: Fetch content from a URL (documentation, reference pages)
+Use these to look up anything you need - ROM routines, algorithms, game logic, etc.
+
+DISK TOOLS (saves to user's disk):
+- disk_save_basic: Save BASIC program to disk (user can load later)
+- disk_save_binary: Save machine code to disk
+- disk_save_text: Save text/data files to disk
+- disk_list: List files on the disk
+Offer to save programs to disk so user can use them later!
+
 6502 ASSEMBLY TIPS (ca65 format):
 - Use .org $6000 for load address
 - End with RTS to return cleanly
@@ -602,7 +837,7 @@ CRITICAL RULES:
 1. ALWAYS boot emulator first
 2. ALWAYS test before deploying
 3. Send status updates for EVERY step
-4. After deploy: "TYPE /SUSPEND THEN RUN" (BASIC) or "TYPE /SUSPEND THEN CALL 24576" (ML)
+4. After deploy: "TYPE /EXIT THEN RUN" (BASIC) or "TYPE /EXIT THEN CALL 24576" (ML)
 5. Keep messages UPPERCASE
 
 You are the user's AI programming partner. Make it feel magical!"""
