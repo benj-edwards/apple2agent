@@ -259,6 +259,26 @@ class Emulator:
         # Clean up PID file
         _remove_pid_file()
 
+    def pause(self):
+        """Pause emulation to save CPU. Call resume() before next operation."""
+        if self.control_socket:
+            try:
+                self.control_socket.pause()
+            except ControlSocketError:
+                pass
+
+    def resume(self):
+        """Resume emulation after pause."""
+        if self.control_socket:
+            try:
+                self.control_socket.resume()
+            except ControlSocketError:
+                pass
+
+    def _ensure_running(self):
+        """Ensure emulator is running (not paused). Call before operations."""
+        self.resume()
+
     def enter_debugger(self, timeout: float = 2.0, max_retries: int = 3) -> bool:
         """Enter the Bobbin debugger (Ctrl-C twice).
 
@@ -641,6 +661,9 @@ class Emulator:
         if not self.is_running:
             raise BobbinError("Emulator not running")
 
+        # Auto-resume if paused - CPU needs to process keystrokes
+        self._ensure_running()
+
         # Apple II is uppercase
         text = text.upper()
         if include_return:
@@ -707,6 +730,9 @@ class Emulator:
         """
         if not self.is_running:
             raise BobbinError("Emulator not running")
+
+        # Auto-resume if paused - CPU needs to process keystrokes
+        self._ensure_running()
 
         # Use reliable injection by default
         if use_inject:
@@ -840,6 +866,9 @@ class Emulator:
         Args:
             cold: If True, do a cold reset (full reboot). Otherwise warm reset.
         """
+        # Auto-resume if paused
+        self._ensure_running()
+
         # Use control socket if available (much more reliable)
         if self.control_socket:
             try:

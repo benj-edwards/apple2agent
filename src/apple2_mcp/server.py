@@ -118,6 +118,16 @@ async def list_tools() -> list[Tool]:
             inputSchema={"type": "object", "properties": {}}
         ),
         Tool(
+            name="pause",
+            description="Pause emulation to save CPU. The emulator stays loaded but stops executing. Use resume to continue.",
+            inputSchema={"type": "object", "properties": {}}
+        ),
+        Tool(
+            name="resume",
+            description="Resume emulation after pause.",
+            inputSchema={"type": "object", "properties": {}}
+        ),
+        Tool(
             name="reset",
             description="Reset the emulator.",
             inputSchema={
@@ -1077,6 +1087,14 @@ async def _call_tool_impl(name: str, args: dict[str, Any]) -> str:
     elif name == "shutdown":
         emu.shutdown()
         return "Emulator stopped."
+
+    elif name == "pause":
+        emu.pause()
+        return "Emulation paused. CPU usage reduced. Call resume before next operation."
+
+    elif name == "resume":
+        emu.resume()
+        return "Emulation resumed."
 
     elif name == "reset":
         cold = args.get("cold", False)
