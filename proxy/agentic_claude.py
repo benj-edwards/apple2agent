@@ -242,34 +242,6 @@ APPLE2_TOOLS = [
         }
     },
     {
-        "name": "web_search",
-        "description": "Search the web for information. Use this to look up Apple II programming references, find code examples, research algorithms, or get any information needed to complete the user's request.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Search query"
-                }
-            },
-            "required": ["query"]
-        }
-    },
-    {
-        "name": "web_fetch",
-        "description": "Fetch and read content from a URL. Use this to read documentation, code examples, or reference material from the web.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "url": {
-                    "type": "string",
-                    "description": "URL to fetch"
-                }
-            },
-            "required": ["url"]
-        }
-    },
-    {
         "name": "disk_save_basic",
         "description": "Save a BASIC program to disk. The program will be tokenized and saved so the user can BLOAD or RUN it later. Requires user permission.",
         "input_schema": {
@@ -511,48 +483,6 @@ class AgenticClaude:
                 return f"Called ${address:04X}: {result}"
             except Exception as e:
                 return f"ERROR: {str(e)}"
-
-        elif tool_name == "web_search":
-            query = tool_input.get("query", "")
-            try:
-                import urllib.request
-                import urllib.parse
-                import json
-                # Use DuckDuckGo instant answer API (no API key needed)
-                encoded = urllib.parse.quote(query)
-                url = f"https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1"
-                req = urllib.request.Request(url, headers={'User-Agent': 'Apple2Agent/1.0'})
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    data = json.loads(resp.read().decode('utf-8'))
-                # Extract useful info
-                results = []
-                if data.get('Abstract'):
-                    results.append(f"Summary: {data['Abstract']}")
-                if data.get('AbstractSource'):
-                    results.append(f"Source: {data['AbstractSource']}")
-                for topic in data.get('RelatedTopics', [])[:5]:
-                    if isinstance(topic, dict) and topic.get('Text'):
-                        results.append(f"- {topic['Text'][:200]}")
-                if results:
-                    return "\n".join(results)
-                else:
-                    return f"No instant results for '{query}'. Try a more specific query or use web_fetch with a known URL."
-            except Exception as e:
-                return f"Search error: {str(e)}"
-
-        elif tool_name == "web_fetch":
-            url = tool_input.get("url", "")
-            try:
-                import urllib.request
-                req = urllib.request.Request(url, headers={'User-Agent': 'Apple2Agent/1.0'})
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    content = resp.read().decode('utf-8', errors='replace')
-                # Truncate if too long
-                if len(content) > 10000:
-                    content = content[:10000] + "\n... (truncated)"
-                return content
-            except Exception as e:
-                return f"Fetch error: {str(e)}"
 
         elif tool_name == "disk_save_basic":
             filename = tool_input.get("filename", "PROGRAM").upper()[:15]
@@ -815,10 +745,10 @@ COMMON TOOLS:
 - apple2_send_status: Update status line (USE OFTEN!)
 - apple2_send_message: Show text to user
 
-RESEARCH TOOLS:
-- web_search: Search the web for Apple II programming info, algorithms, examples
-- web_fetch: Fetch content from a URL (documentation, reference pages)
-Use these to look up anything you need - ROM routines, algorithms, game logic, etc.
+WEB SEARCH:
+You have web search capability - use it to look up Apple II programming info,
+ROM routines, algorithms, code examples, or anything else you need.
+Search results will include citations.
 
 DISK TOOLS (saves to user's disk):
 - disk_save_basic: Save BASIC program to disk (user can load later)
@@ -849,11 +779,15 @@ You are the user's AI programming partner. Make it feel magical!"""
             self._compact_conversation(model)
 
             try:
+                # Include Anthropic's native web search tool
+                all_tools = APPLE2_TOOLS + [
+                    {"type": "web_search_20250305", "max_uses": 3}
+                ]
                 response = self.client.messages.create(
                     model=model,
                     max_tokens=4096,
                     system=system_prompt,
-                    tools=APPLE2_TOOLS,
+                    tools=all_tools,
                     messages=self.conversation
                 )
 
