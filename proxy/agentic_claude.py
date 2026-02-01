@@ -872,26 +872,28 @@ You are the user's AI programming partner. Make it feel magical!"""
                         tool_id = block.id
 
                         # Update status with friendly name
-                        friendly_names = {
-                            "emulator_boot": "BOOTING EMULATOR",
-                            "emulator_type": "TYPING",
-                            "emulator_read_screen": "READING SCREEN",
-                            "emulator_run_basic": "RUNNING BASIC",
-                            "emulator_inject_basic": "LOADING PROGRAM",
-                            "emulator_capture_graphics": "CAPTURING GRAPHICS",
-                            "emulator_peek": "READING MEMORY",
-                            "emulator_poke": "WRITING MEMORY",
-                            "emulator_assemble": "ASSEMBLING",
-                            "emulator_call": "EXECUTING CODE",
-                            "apple2_send_code": "DEPLOYING CODE",
-                            "apple2_send_binary": "DEPLOYING BINARY",
-                            "apple2_send_message": "SENDING MESSAGE",
-                            "disk_save_basic": "SAVING TO DISK",
-                            "disk_save_binary": "SAVING BINARY",
-                            "disk_list": "LISTING DISK",
-                        }
-                        friendly = friendly_names.get(tool_name, tool_name.upper())
-                        self.send_status(f"{friendly}...")
+                        # Skip showing status for apple2_send_status since it sends its own
+                        if tool_name != "apple2_send_status":
+                            friendly_names = {
+                                "emulator_boot": "BOOTING EMULATOR",
+                                "emulator_type": "TYPING",
+                                "emulator_read_screen": "READING SCREEN",
+                                "emulator_run_basic": "RUNNING BASIC",
+                                "emulator_inject_basic": "LOADING PROGRAM",
+                                "emulator_capture_graphics": "CAPTURING GRAPHICS",
+                                "emulator_peek": "READING MEMORY",
+                                "emulator_poke": "WRITING MEMORY",
+                                "emulator_assemble": "ASSEMBLING",
+                                "emulator_call": "EXECUTING CODE",
+                                "apple2_send_code": "DEPLOYING CODE",
+                                "apple2_send_binary": "DEPLOYING BINARY",
+                                "apple2_send_message": "SENDING MESSAGE",
+                                "disk_save_basic": "SAVING TO DISK",
+                                "disk_save_binary": "SAVING BINARY",
+                                "disk_list": "LISTING DISK",
+                            }
+                            friendly = friendly_names.get(tool_name, tool_name.upper())
+                            self.send_status(f"{friendly}...")
 
                         assistant_content.append({
                             "type": "tool_use",
