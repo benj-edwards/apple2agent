@@ -356,6 +356,19 @@ class EmulatorBridge:
             path = params.get("path", "/tmp/state.bin")
             return self.sock.load_state(path)
 
+        # ProDOS disk operations
+        if tool_name == "mcp__apple2-mcp__prodos_list":
+            disk = params.get("disk", "")
+            return self._prodos_list(disk)
+
+        if tool_name == "mcp__apple2-mcp__prodos_add":
+            disk = params.get("disk", "")
+            local_file = params.get("file", "")
+            name = params.get("name", "")
+            file_type = params.get("type", "TXT")
+            aux_addr = params.get("addr", "0000")
+            return self._prodos_add(disk, local_file, name, file_type, aux_addr)
+
         return {"error": f"Unknown tool: {tool_name}"}
 
     def _assemble(self, source: str, load_addr: int) -> dict:
@@ -414,6 +427,44 @@ SEGMENTS {{
 
         except FileNotFoundError:
             return {"error": "ca65/ld65 not found - install cc65 toolchain"}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _prodos_list(self, disk: str) -> dict:
+        """List files on a ProDOS disk image."""
+        try:
+            # Get path to prodos.py tool
+            tools_dir = os.path.join(os.path.dirname(__file__), '..', 'tools')
+            prodos_tool = os.path.join(tools_dir, 'prodos.py')
+
+            result = subprocess.run(
+                [sys.executable, prodos_tool, 'list', disk],
+                capture_output=True, text=True, cwd=os.path.dirname(__file__) + '/..'
+            )
+            if result.returncode != 0:
+                return {"error": result.stderr or result.stdout}
+            return {"catalog": result.stdout}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _prodos_add(self, disk: str, local_file: str, name: str, file_type: str, aux_addr: str) -> dict:
+        """Add a file to a ProDOS disk image."""
+        try:
+            # Get path to prodos.py tool
+            tools_dir = os.path.join(os.path.dirname(__file__), '..', 'tools')
+            prodos_tool = os.path.join(tools_dir, 'prodos.py')
+
+            # Build command: prodos.py add <disk> <local_file> <name> [type] [aux_addr]
+            cmd = [sys.executable, prodos_tool, 'add', disk, local_file, name, file_type]
+            if aux_addr:
+                cmd.append(aux_addr)
+
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, cwd=os.path.dirname(__file__) + '/..'
+            )
+            if result.returncode != 0:
+                return {"error": result.stderr or result.stdout}
+            return {"ok": True, "output": result.stdout}
         except Exception as e:
             return {"error": str(e)}
 
