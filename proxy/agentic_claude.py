@@ -316,6 +316,15 @@ APPLE2_TOOLS = [
             "properties": {},
             "required": []
         }
+    },
+    {
+        "name": "emulator_read_basic_program",
+        "description": "Read the current BASIC program from emulator memory and detokenize it. Use this when the user reports an error or you need to see what's in memory.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
     }
 ]
 
@@ -640,6 +649,66 @@ class AgenticClaude:
             except Exception as e:
                 return f"Disk list error: {str(e)}"
 
+        elif tool_name == "emulator_read_basic_program":
+            if not self.mcp_call:
+                return "ERROR: Emulator not available (no MCP connection)"
+            try:
+                self.send_status("READING PROGRAM...")
+                # Read VARTAB pointer ($69-$6A) to find end of program
+                vartab_result = self.mcp_call("mcp__apple2-mcp__peek", {
+                    "address": 0x69,
+                    "count": 2,
+                    "format": "decimal"
+                })
+                # Parse the result to get the address
+                if isinstance(vartab_result, dict) and "bytes" in vartab_result:
+                    vartab_bytes = vartab_result["bytes"]
+                    vartab = vartab_bytes[0] + (vartab_bytes[1] << 8)
+                elif isinstance(vartab_result, str):
+                    # Try to parse from string
+                    import re
+                    nums = re.findall(r'\d+', vartab_result)
+                    if len(nums) >= 2:
+                        vartab = int(nums[0]) + (int(nums[1]) << 8)
+                    else:
+                        return f"ERROR: Could not parse VARTAB: {vartab_result}"
+                else:
+                    return f"ERROR: Unexpected VARTAB format: {vartab_result}"
+
+                # Calculate program size
+                prog_start = 0x0801
+                prog_size = vartab - prog_start
+                if prog_size <= 0 or prog_size > 48000:
+                    return f"No program in memory (VARTAB=${vartab:04X})"
+
+                # Read program bytes in chunks
+                self.send_status(f"READING {prog_size} BYTES...")
+                all_bytes = []
+                offset = 0
+                while offset < prog_size:
+                    chunk_size = min(256, prog_size - offset)
+                    result = self.mcp_call("mcp__apple2-mcp__peek", {
+                        "address": prog_start + offset,
+                        "count": chunk_size,
+                        "format": "decimal"
+                    })
+                    if isinstance(result, dict) and "bytes" in result:
+                        all_bytes.extend(result["bytes"])
+                    offset += chunk_size
+
+                # Detokenize the program
+                self.send_status("DETOKENIZING...")
+                from basic_tokenizer_streaming import detokenize_program
+                try:
+                    source = detokenize_program(bytes(all_bytes))
+                    return f"Current BASIC program ({prog_size} bytes):\n\n{source}"
+                except Exception as e:
+                    return f"Detokenize error: {str(e)}\nRaw bytes: {all_bytes[:50]}..."
+
+            except Exception as e:
+                self.send_status("READ FAILED")
+                return f"ERROR reading program: {str(e)}"
+
         else:
             return f"ERROR: Unknown tool: {tool_name}"
 
@@ -770,11 +839,23 @@ Be concise but preserve important technical details."""
 
         system_prompt = """You are Apple II Agent - an expert AI programmer that creates code for Apple II.
 
+SESSION PERSISTENCE:
+- You have MEMORY! Conversation history is preserved across reconnects.
+- When user says "& to return" and comes back, you remember what you discussed.
+- If user reports an error, you remember what code you wrote!
+- Use emulator_read_basic_program to see EXACTLY what's in memory if needed.
+- /RESET command clears your memory and starts fresh.
+
 CHOOSING LANGUAGE:
 - If user says "BASIC" or doesn't specify: use Applesoft BASIC
 - If user says "assembly", "machine language", "ML", "6502", "fast": use 6502 assembly
 - For games that need speed (shooters, action): suggest assembly
 - For utilities, demos, simple programs: BASIC is fine
+
+ERROR HANDLING:
+- If user reports "SYNTAX ERROR IN LINE XX", you remember the code you wrote!
+- First try to fix from memory. If unclear, use emulator_read_basic_program.
+- Common errors: missing quotes, wrong keyword, NEXT without FOR, etc.
 
 WORKFLOW - SIMPLE vs COMPLEX programs:
 

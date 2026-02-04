@@ -374,7 +374,7 @@ class AppleIISession:
     """Handles a single Apple II connection."""
 
     def __init__(self, sock: socket.socket, addr: tuple, claude: ClaudeClient,
-                 mcp_call: Optional[Callable] = None):
+                 mcp_call: Optional[Callable] = None, proxy: Optional['UnifiedProxy'] = None):
         self.sock = sock
         self.addr = addr
         self.claude = claude
@@ -386,7 +386,7 @@ class AppleIISession:
         self.custom_prompt = None  # Custom system prompt
         self.agentic_mode = True  # DEFAULT ON - agentic software development
         self.mcp_call = mcp_call  # Function to call MCP tools (for emulator)
-        self.agentic_claude: Optional[AgenticClaude] = None
+        self.proxy = proxy  # Reference to parent proxy for persistent state
         self.max_turns = 20  # Max agentic turns
         self.keep_history = True  # Keep conversation history between messages
         self.final_response_sent = False  # Track if FINAL response already sent
@@ -459,8 +459,9 @@ class AppleIISession:
         model_name = MODEL_NAMES.get(self.model, "Sonnet")
         self._send_status(f"CONNECTED - {model_name.upper()}")
 
-        # Initialize agentic Claude if agentic mode is on by default
-        if self.agentic_mode and not self.agentic_claude:
+        # Get or create PERSISTENT agentic Claude from proxy
+        # This survives reconnects so conversation history is preserved!
+        if self.agentic_mode and self.proxy:
             # Create throttled status function - max 1 update per 0.3 seconds
             self._last_status_time = 0
             self._last_status_msg = ""
@@ -472,14 +473,29 @@ class AppleIISession:
                     self._last_status_time = now
                     self._last_status_msg = msg
 
-            self.agentic_claude = AgenticClaude(
-                send_to_apple2=self._send_response,
-                send_status=throttled_status,  # Throttled to prevent crashes
-                send_code=self._send_basic_code,
-                mcp_call=self.mcp_call,
-                send_binary=self._send_binary_code
-            )
-            print(f"[Session] Agentic Claude initialized (throttled status)")
+            if self.proxy.agentic_claude is None:
+                # First connection - create the agentic instance
+                self.proxy.agentic_claude = AgenticClaude(
+                    send_to_apple2=self._send_response,
+                    send_status=throttled_status,
+                    send_code=self._send_basic_code,
+                    mcp_call=self.mcp_call,
+                    send_binary=self._send_binary_code
+                )
+                print(f"[Session] Agentic Claude created (persistent)")
+            else:
+                # Reconnect - update callbacks to use this session's socket
+                self.proxy.agentic_claude.send_to_apple2 = self._send_response
+                self.proxy.agentic_claude.send_status = throttled_status
+                self.proxy.agentic_claude.send_code = self._send_basic_code
+                self.proxy.agentic_claude.send_binary = self._send_binary_code
+                # Check if there's existing conversation history
+                history_len = len(self.proxy.agentic_claude.conversation)
+                if history_len > 0:
+                    print(f"[Session] Resuming with {history_len} messages in history")
+                    self._send_status("SESSION RESUMED")
+                else:
+                    print(f"[Session] Agentic Claude reconnected (no history)")
 
     def _handle_chat(self, packet: Packet):
         """Handle CHAT packet - user message."""
@@ -512,16 +528,15 @@ class AppleIISession:
         if command == 'HELP':
             self._send_response(
                 "/HELP - SHOW COMMANDS\n"
-                "/AGENT - TOGGLE APPLE II AGENT MODE\n"
+                "/AGENT - TOGGLE AGENT MODE\n"
+                "/RESET - NEW SESSION\n"
+                "/CLEAR - CLEAR HISTORY\n"
                 "/MODEL S|O|H - SET MODEL\n"
                 "/SUSPEND - DROP TO BASIC\n"
-                "/CODE <DESC> - GENERATE BASIC\n"
-                "/CHAT <MSG> - CHAT WITH CLAUDE\n"
-                "/TURNS <N> - SET MAX AGENT TURNS\n"
-                "/HISTORY - TOGGLE MEMORY\n"
-                "/CLEAR - CLEAR CONVERSATION\n"
-                "/PROMPT <TEXT> - SET PROMPT\n"
-                "/IP - SHOW CONNECTION INFO"
+                "/CODE <DESC> - MAKE BASIC\n"
+                "/CHAT <MSG> - JUST CHAT\n"
+                "/TURNS <N> - MAX TURNS\n"
+                "/IP - CONNECTION INFO"
             )
         elif command == 'SUSPEND':
             self._handle_suspend()
@@ -546,12 +561,19 @@ class AppleIISession:
                 self._send_response("HISTORY ON - REMEMBERING CONVERSATION")
             else:
                 self._send_response("HISTORY OFF - EACH MESSAGE IS FRESH")
-                if self.agentic_claude:
-                    self.agentic_claude.clear_conversation()
+                if self.proxy and self.proxy.agentic_claude:
+                    self.proxy.agentic_claude.clear_conversation()
         elif command == 'CLEAR':
-            if self.agentic_claude:
-                self.agentic_claude.clear_conversation()
+            # Clear conversation but keep session
+            if self.proxy and self.proxy.agentic_claude:
+                self.proxy.agentic_claude.clear_conversation()
             self._send_response("CONVERSATION CLEARED")
+        elif command == 'RESET':
+            # Full reset - clear everything and start fresh
+            if self.proxy and self.proxy.agentic_claude:
+                self.proxy.agentic_claude.clear_conversation()
+                self.proxy.agentic_claude.emulator_running = False
+            self._send_response("SESSION RESET\nFRESH START!")
         elif command == 'CODE':
             desc = parts[1] if len(parts) > 1 else "simple hello world"
             self._generate_code(desc)
@@ -684,8 +706,8 @@ class AppleIISession:
         self.agentic_mode = not self.agentic_mode
 
         if self.agentic_mode:
-            # Initialize agentic Claude if needed
-            if not self.agentic_claude:
+            # Use proxy's persistent agentic Claude
+            if self.proxy and self.proxy.agentic_claude is None:
                 # Create throttled status function
                 self._last_status_time = 0
                 self._last_status_msg = ""
@@ -696,7 +718,7 @@ class AppleIISession:
                         self._last_status_time = now
                         self._last_status_msg = msg
 
-                self.agentic_claude = AgenticClaude(
+                self.proxy.agentic_claude = AgenticClaude(
                     send_to_apple2=self._send_response,
                     send_status=throttled_status,
                     send_code=self._send_basic_code,
@@ -712,7 +734,7 @@ class AppleIISession:
                 "DESCRIBE WHAT YOU WANT!\n"
                 "\n"
                 "/SUSPEND - RUN YOUR PROGRAM\n"
-                "/CLEAR   - NEW CONVERSATION\n"
+                "/RESET   - NEW SESSION\n"
                 "/HELP    - ALL COMMANDS\n"
                 "================================\n"
             )
@@ -726,13 +748,15 @@ class AppleIISession:
 
     def _agentic_response(self, message: str):
         """Handle message in agentic mode."""
-        if not self.agentic_claude:
+        # Use the proxy's persistent agentic_claude
+        agentic = self.proxy.agentic_claude if self.proxy else None
+        if not agentic:
             self._send_error("AGENTIC MODE NOT INITIALIZED")
             return
 
         # Clear history if not keeping it
         if not self.keep_history:
-            self.agentic_claude.clear_conversation()
+            agentic.clear_conversation()
 
         # Get model ID
         model_id = MODEL_IDS.get(self.model, MODEL_IDS[MODEL_SONNET])
@@ -743,7 +767,7 @@ class AppleIISession:
                 message = f"[CONTEXT: {self.custom_prompt}]\n\n{message}"
 
             # Run the agentic loop
-            response = self.agentic_claude.run_agentic(
+            response = agentic.run_agentic(
                 message,
                 model=model_id,
                 max_turns=self.max_turns
@@ -813,6 +837,9 @@ class UnifiedProxy:
         self.sessions: Dict[tuple, AppleIISession] = {}
         self.mcp_call = mcp_call  # Function to call MCP tools (for emulator)
 
+        # Persistent agentic session - survives reconnects!
+        self.agentic_claude: Optional[AgenticClaude] = None
+
     def start(self):
         """Start the proxy server."""
         self.running = True
@@ -853,7 +880,8 @@ class UnifiedProxy:
                 try:
                     client, addr = server.accept()
                     # Handle each connection in a thread
-                    session = AppleIISession(client, addr, self.claude, self.mcp_call)
+                    # Pass proxy reference so session can access persistent agentic_claude
+                    session = AppleIISession(client, addr, self.claude, self.mcp_call, proxy=self)
                     self.sessions[addr] = session
                     thread = threading.Thread(target=session.run, daemon=True)
                     thread.start()
