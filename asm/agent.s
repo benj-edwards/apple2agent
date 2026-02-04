@@ -828,8 +828,9 @@ handle_command:
 @check_q:
         ; /QUIT
         cmp #'Q'
-        beq @quit
-
+        bne @not_quit
+        jmp @quit
+@not_quit:
         ; /EXIT (alias for /SUSPEND)
         cmp #'E'
         beq @suspend
@@ -892,8 +893,20 @@ handle_command:
 @check_m:
         ; /MODEL
         cmp #'M'
-        bne @unknown
+        bne @check_r
         jsr cmd_model
+        rts
+
+@check_r:
+        ; /RESET - Send to server, it handles clearing session
+        cmp #'R'
+        bne @unknown
+        lda input_buffer+2
+        jsr to_upper
+        cmp #'E'
+        bne @unknown
+        ; Send "/RESET" to server as chat message
+        jsr cmd_reset
         rts
 
 @help:
@@ -1249,6 +1262,31 @@ cmd_save:
         ldax #msg_save_failed
         jsr print_status     ; "SAVE FAILED" on status line
         rts
+
+;-------------------------------------------------------------------------------
+; Command: /RESET - Reset session on server
+;-------------------------------------------------------------------------------
+cmd_reset:
+        ldax #msg_resetting
+        jsr print_status     ; "RESETTING SESSION..."
+
+        ; Copy "/RESET" to input_buffer so send_chat can use it
+        ldy #0
+@copy:  lda reset_cmd_text,y
+        beq @done_copy
+        sta input_buffer,y
+        iny
+        bne @copy
+@done_copy:
+        sty input_len        ; input_len = 6
+
+        ; Send as chat message - server will clear conversation
+        jsr send_chat
+
+        rts
+
+reset_cmd_text:
+        .byte "/RESET", 0
 
 ;-------------------------------------------------------------------------------
 ; Command: /MODEL [S|O|H] - Set AI model
@@ -3030,6 +3068,9 @@ msg_saving:
 msg_saved:
         .byte "SAVED!", 0
 
+msg_resetting:
+        .byte "RESETTING SESSION...", 0
+
 msg_save_failed:
         .byte "SAVE FAILED", 0
 
@@ -3078,12 +3119,12 @@ ui_separator:
 help_text:
         .byte "/HELP    - SHOW COMMANDS", 13
         .byte "/EXIT    - DROP TO BASIC", 13
+        .byte "/RESET   - NEW SESSION", 13
         .byte "/IP      - SHOW PROXY IP", 13
         .byte "/SETIP   - SET PROXY IP", 13
         .byte "/PORT    - SET PORT", 13
         .byte "/MODEL   - SET AI MODEL", 13
         .byte "/SAVE    - SAVE CONFIG", 13
-        .byte "/CODE    - GENERATE BASIC", 13
         .byte "/CLEAR   - CLEAR SCREEN", 13
         .byte "ESC      - MENU", 13, 0
 
