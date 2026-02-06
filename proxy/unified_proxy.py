@@ -530,6 +530,7 @@ class AppleIISession:
                 "/HELP - SHOW COMMANDS\n"
                 "/AGENT - TOGGLE AGENT MODE\n"
                 "/RESET - NEW SESSION\n"
+                "/PROMPT <TXT> - SET CONTEXT\n"
                 "/CLEAR - CLEAR HISTORY\n"
                 "/MODEL S|O|H - SET MODEL\n"
                 "/SUSPEND - DROP TO BASIC\n"
@@ -585,10 +586,16 @@ class AppleIISession:
                 self.custom_prompt = parts[1]
                 self._send_response(f"PROMPT SET: {parts[1][:30]}...")
                 print(f"[Session] Custom prompt: {self.custom_prompt}")
+                # Also set on agentic claude instance
+                if self.proxy and self.proxy.agentic_claude:
+                    self.proxy.agentic_claude.set_custom_prompt(parts[1])
             else:
                 self.custom_prompt = None
                 self._send_response("PROMPT CLEARED - USING DEFAULT")
                 print("[Session] Custom prompt cleared")
+                # Also clear on agentic claude instance
+                if self.proxy and self.proxy.agentic_claude:
+                    self.proxy.agentic_claude.clear_custom_prompt()
         elif command == 'IP':
             self._send_response(f"CONNECTED FROM {self.addr[0]}")
         elif command == 'MODEL':

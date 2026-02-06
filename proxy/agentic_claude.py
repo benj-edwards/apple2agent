@@ -375,6 +375,17 @@ class AgenticClaude:
         self.max_context_tokens = 150000  # Leave headroom for 200k context
         self.compact_threshold = 100000   # Start compacting at this level
 
+        # Custom prompt - user can set additional context/instructions
+        self.custom_prompt: Optional[str] = None
+
+    def set_custom_prompt(self, prompt: Optional[str]) -> None:
+        """Set a custom prompt that will be appended to the system prompt."""
+        self.custom_prompt = prompt
+
+    def clear_custom_prompt(self) -> None:
+        """Clear the custom prompt."""
+        self.custom_prompt = None
+
     def _execute_tool(self, tool_name: str, tool_input: dict) -> str:
         """Execute a tool and return the result."""
 
@@ -918,6 +929,10 @@ CRITICAL RULES:
 5. Keep messages UPPERCASE
 
 You are the user's AI programming partner. Be FAST for simple stuff!"""
+
+        # Append custom prompt if set
+        if self.custom_prompt:
+            system_prompt += f"\n\nUSER CONTEXT/INSTRUCTIONS:\n{self.custom_prompt}"
 
         self.send_status("THINKING...")
 

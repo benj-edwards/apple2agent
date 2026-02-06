@@ -880,13 +880,19 @@ handle_command:
         jmp $E003            ; BASIC warm start (]) - no return
 
 @check_p:
-        ; /PORT
+        ; /PORT or /PROMPT
         cmp #'P'
         bne @check_m
         lda input_buffer+2
         jsr to_upper
         cmp #'O'
+        beq @port
+        cmp #'R'
         bne @unknown
+        ; /PROMPT - send to server as chat message
+        jsr cmd_prompt
+        rts
+@port:
         jsr cmd_port
         rts
 
@@ -1287,6 +1293,16 @@ cmd_reset:
 
 reset_cmd_text:
         .byte "/RESET", 0
+
+;-------------------------------------------------------------------------------
+; Command: /PROMPT [text] - Set custom system prompt
+;-------------------------------------------------------------------------------
+cmd_prompt:
+        ; Just send the whole input buffer to server as chat
+        ; Server parses "/PROMPT text" and handles it
+        ; If no argument, server will clear the prompt
+        jsr send_chat
+        rts
 
 ;-------------------------------------------------------------------------------
 ; Command: /MODEL [S|O|H] - Set AI model
@@ -3120,6 +3136,7 @@ help_text:
         .byte "/HELP    - SHOW COMMANDS", 13
         .byte "/EXIT    - DROP TO BASIC", 13
         .byte "/RESET   - NEW SESSION", 13
+        .byte "/PROMPT  - SET AI CONTEXT", 13
         .byte "/IP      - SHOW PROXY IP", 13
         .byte "/SETIP   - SET PROXY IP", 13
         .byte "/PORT    - SET PORT", 13
