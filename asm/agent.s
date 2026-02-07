@@ -2371,6 +2371,10 @@ receive_response_no_init:
         jsr print_status
 
 @wait_loop:
+        ; Call ip65_process multiple times to drain buffered TCP segments
+        ; (ip65 may deliver one segment per call even if multiple are queued)
+        jsr ip65_process
+        jsr ip65_process
         jsr ip65_process
 
         ; Send any pending ACKs (after callback returns)
@@ -2616,15 +2620,14 @@ recv_callback:
         ; DEBUG: After state restore at $0354
         inc $0354
 
-        ; WORKAROUND: Only process ONE packet per callback
-        ; Multiple packets in one callback causes crash (unknown root cause)
-        ; Reset state for next callback UNLESS we're done
+        ; Continue processing remaining data in this callback
+        ; (W5100 buffer fix allows safe multi-packet processing)
         lda recv_state
         cmp #STATE_DONE
         beq @done            ; Don't reset if response is complete!
         lda #STATE_MAGIC_0
         sta recv_state
-        jmp @done            ; Exit immediately after first packet
+        jmp @process_loop    ; Process next packet in same callback
 
 @bad_checksum:
         ; Send NACK
@@ -2809,6 +2812,27 @@ handle_code_chunk:
 ; Handle STATUS packet - writes directly to screen line 22 (no scroll)
 ;-------------------------------------------------------------------------------
 handle_status_msg:
+        ; Check if "DONE" - signals end of agentic response
+        lda pkt_data_pos
+        cmp #4
+        bne @not_done
+        lda pkt_buffer
+        cmp #'D'
+        bne @not_done
+        lda pkt_buffer+1
+        cmp #'O'
+        bne @not_done
+        lda pkt_buffer+2
+        cmp #'N'
+        bne @not_done
+        lda pkt_buffer+3
+        cmp #'E'
+        bne @not_done
+        ; It's "DONE" - mark response complete
+        lda #STATE_DONE
+        sta recv_state
+@not_done:
+
         ; Clear line 22 first
         jsr status_msg
 
@@ -2869,7 +2893,9 @@ handle_error_msg:
 ; feedback loop where tcp_send triggers recv_callback which queues more ACKs
 ;-------------------------------------------------------------------------------
 send_pending_acks:
-        ; DEBUG: Skip ACK sending temporarily to isolate crash
+        ; ACK sending disabled - tcp_send during receive loop causes
+        ; ip65 buffer issues and packet loss. Heartbeat thread on proxy
+        ; side keeps the TCP connection alive instead.
         rts
 
         lda pending_ack_count

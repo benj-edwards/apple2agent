@@ -13,6 +13,8 @@ The agent can work in the emulator for speed, then deploy to real hardware.
 import os
 import json
 import subprocess
+import threading
+import time
 from typing import Optional, Callable, Dict, List, Any
 
 # Try to import anthropic
@@ -371,6 +373,13 @@ class AgenticClaude:
         self.last_binary: Optional[str] = None
         self.last_binary_addr: int = 0x6000
 
+        # Thread-safe heartbeat to keep Apple II TCP connection alive
+        self._send_lock = threading.Lock()
+        self._last_send_time = 0.0
+        self._heartbeat_running = False
+        self._heartbeat_thread = None
+        self._heartbeat_paused = False  # Pause during code deployment
+
         # Context management - compact when approaching limit
         self.max_context_tokens = 150000  # Leave headroom for 200k context
         self.compact_threshold = 100000   # Start compacting at this level
@@ -503,7 +512,13 @@ class AgenticClaude:
         elif tool_name == "apple2_send_code":
             self.send_status("DEPLOYING TO APPLE II...")
             source = tool_input.get("source", "")
-            self.send_code(source)
+            # Pause heartbeat during code deployment to prevent
+            # interleaved STATUS packets corrupting CODE stream
+            self._heartbeat_paused = True
+            try:
+                self.send_code(source)
+            finally:
+                self._heartbeat_paused = False
             self.send_status("CODE DEPLOYED!")
             return "Code sent to Apple II"
 
@@ -826,6 +841,55 @@ Be concise but preserve important technical details."""
             print(f"[Agent] Compaction failed: {e}")
             return False
 
+    def _start_heartbeat(self):
+        """Start background heartbeat thread to keep Apple II TCP alive.
+
+        Wraps send_status with a lock so heartbeat and main thread don't
+        interleave socket writes.
+        """
+        self._heartbeat_running = True
+        self._last_send_time = time.time()
+        self._original_send_status = self.send_status
+
+        # Replace send_status with thread-safe version
+        def locked_send(msg):
+            with self._send_lock:
+                self._original_send_status(msg)
+                self._last_send_time = time.time()
+        self.send_status = locked_send
+
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop, daemon=True
+        )
+        self._heartbeat_thread.start()
+
+    def _stop_heartbeat(self):
+        """Stop background heartbeat thread and restore send_status."""
+        self._heartbeat_running = False
+        if self._heartbeat_thread:
+            self._heartbeat_thread.join(timeout=5)
+            self._heartbeat_thread = None
+        # Restore original (unwrapped) send_status
+        if hasattr(self, '_original_send_status'):
+            self.send_status = self._original_send_status
+
+    def _heartbeat_loop(self):
+        """Send periodic heartbeat dots when no other traffic is flowing."""
+        while self._heartbeat_running:
+            time.sleep(2)
+            if not self._heartbeat_running:
+                break
+            # Don't send heartbeat during code deployment - interleaved
+            # STATUS packets cause the agent to drop CODE packets
+            if self._heartbeat_paused:
+                continue
+            # Only send heartbeat if no other message was sent recently
+            if time.time() - self._last_send_time > 1.5:
+                try:
+                    self.send_status(".")
+                except Exception:
+                    pass  # Connection may be dead - let main loop handle it
+
     def run_agentic(self, user_message: str, model: str = "claude-sonnet-4-20250514",
                     max_turns: int = 20) -> str:
         """
@@ -947,6 +1011,15 @@ You are the user's AI programming partner. Be FAST for simple stuff!"""
 
         self.send_status("THINKING...")
 
+        # Start continuous heartbeat to keep Apple II TCP alive
+        self._start_heartbeat()
+        try:
+            return self._run_agentic_loop(model, system_prompt, max_turns)
+        finally:
+            self._stop_heartbeat()
+
+    def _run_agentic_loop(self, model, system_prompt, max_turns):
+        """Inner agentic loop (runs with heartbeat active)."""
         for turn in range(max_turns):
             # Show turn progress
             if turn > 0:
@@ -1078,6 +1151,7 @@ You are the user's AI programming partner. Be FAST for simple stuff!"""
                     self.send_status(f"ERROR: {error_msg[:20]}")
                     return f"ERROR: {error_msg[:100]}"
 
+        self.send_status("DONE")
         return "MAX TURNS REACHED"
 
     def clear_conversation(self):

@@ -6,6 +6,28 @@ All notable changes to the Apple II Agent project.
 
 ### Added
 
+- **Natural Language at BASIC Prompt (Phase 2b)**: Type anything at the `]` prompt - if BASIC can't parse it, the error is intercepted and the original text is sent to Claude automatically. No special prefix or command needed.
+
+  ```
+  ] MAKE A PROGRAM THAT COUNTS TO 10
+    → Intercepted SYNTAX ERROR
+    → "MAKE A PROGRAM THAT COUNTS TO 10" sent to Claude
+    → Claude generates and injects code
+    → Press any key → back to ] prompt
+  ] RUN
+    → Program runs!
+  ```
+
+  **How it works:** Applesoft ROM is copied to Language Card bank 2 RAM, then the error handler at $D412 is patched to jump to our code. When BASIC hits a SYNTAX ERROR in immediate mode, we save the user's original input from the $200 buffer, set a flag, and restart BASIC. A KSWL keyboard hook auto-stuffs `&` + CR to trigger the agent, which detects the flag and sends the saved text to Claude. Valid BASIC commands and program errors pass through normally.
+
+- **Smart Error Detection (Phase 1)**: When `&` is typed after a BASIC error, the agent scans the screen for error messages (lines starting with `?`) and automatically sends them to Claude for help.
+
+- **`/PROMPT` command**: Set a custom system prompt for Claude (`/PROMPT talk like a pirate`). Empty `/PROMPT` clears it back to default.
+
+- **`/RESET` command**: Reset the conversation and connection state.
+
+- **Session persistence**: Agent reconnects to existing proxy sessions after network interruptions.
+
 - **Bobbin Control Socket**: Added Unix domain socket control interface to Bobbin emulator for reliable AI/MCP integration. This completely bypasses the pexpect/PTY/signal issues that caused debugger operations to fail.
 
   **Socket Protocol v2.0** (JSON over `/tmp/bobbin.sock`):
@@ -79,6 +101,8 @@ All notable changes to the Apple II Agent project.
   - Boot automatically connects to socket after emulator starts
 
 ### Fixed
+
+- **Screen save buffer overlapping BSS/IOBUF**: `SCREEN_SAVE` at $A000 overlapped with BSS (extends to $A19E) and IOBUF (to $A5FF). Calling `save_screen` corrupted TCP connection state, causing the `&` return from BASIC to fail every time. Fixed by moving `SCREEN_SAVE` to $A600 and `RECV_BUFFER` to $AA00.
 
 - **prodos_delete.py not freeing disk space**: The ProDOS delete tool was marking directory entries as deleted but not freeing blocks in the volume bitmap, causing "disk full" errors even after deleting files. Fixed by adding `mark_block_free()` and `free_file_blocks()` functions to properly reclaim storage.
 

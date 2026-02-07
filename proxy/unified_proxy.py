@@ -390,6 +390,7 @@ class AppleIISession:
         self.max_turns = 20  # Max agentic turns
         self.keep_history = True  # Keep conversation history between messages
         self.final_response_sent = False  # Track if FINAL response already sent
+        self._send_lock = threading.Lock()  # Serialize socket writes
 
     def run(self):
         """Main session loop."""
@@ -631,11 +632,11 @@ class AppleIISession:
             tokenized = tokenize_program(code, BASIC_START)
             self._send_status(f"CODE: {len(tokenized)} BYTES")
 
-            # Send code packets
+            # Send code packets with generous delay for ip65 TCP stack
             packets = create_code_packets(self.proto, tokenized)
             for packet in packets:
                 self._send(packet)
-                time.sleep(0.01)  # Small delay between packets
+                # No extra delay - agent handles multi-packet callbacks
 
             self._send_status("CODE LOADED - TYPE RUN")
 
@@ -657,13 +658,14 @@ class AppleIISession:
     def _send(self, packet: bytes):
         """Send raw packet with throttling for Apple II."""
         import time
-        try:
-            self.sock.sendall(packet)
-            print(f"[Session] -> sent {len(packet)} bytes: {packet[:20].hex()}...")
-            time.sleep(0.05)  # Throttle sends - Apple II needs time to process
-        except (BrokenPipeError, ConnectionResetError) as e:
-            print(f"[Session] Send error: {e}")
-            self.running = False
+        with self._send_lock:
+            try:
+                self.sock.sendall(packet)
+                print(f"[Session] -> sent {len(packet)} bytes: {packet[:20].hex()}...")
+                time.sleep(0.05)  # 50ms between sends - agent processes multi-packet callbacks
+            except (BrokenPipeError, ConnectionResetError) as e:
+                print(f"[Session] Send error: {e}")
+                self.running = False
 
     def _send_status(self, message: str):
         """Send status message."""
@@ -792,11 +794,11 @@ class AppleIISession:
             tokenized = tokenize_program(source, BASIC_START)
             self._send_status(f"CODE: {len(tokenized)} BYTES")
 
-            # Send code packets
+            # Send code packets with generous delay for ip65 TCP stack
             packets = create_code_packets(self.proto, tokenized)
             for packet in packets:
                 self._send(packet)
-                time.sleep(0.01)
+                # No extra delay - agent handles multi-packet callbacks
             # Mark as final sent so we don't send duplicate response
             self.final_response_sent = True
         except Exception as e:
@@ -886,6 +888,10 @@ class UnifiedProxy:
 
                 try:
                     client, addr = server.accept()
+                    # Disable Nagle's algorithm for low-latency small packets
+                    client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    # Enable TCP keepalive to detect dead connections
+                    client.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
                     # Handle each connection in a thread
                     # Pass proxy reference so session can access persistent agentic_claude
                     session = AppleIISession(client, addr, self.claude, self.mcp_call, proxy=self)
