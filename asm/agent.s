@@ -81,8 +81,9 @@ RESP_FLAG_FINAL = $01           ; This is the final chunk
 ; NOTE: These addresses must be ABOVE the BSS segment end (~$9D40)
 ; to avoid collision with IP65's ethernet buffers
 ;-------------------------------------------------------------------------------
-SCREEN_SAVE     = $A000         ; 1KB screen save buffer ($A000-$A3FF)
-RECV_BUFFER     = $A400         ; 4KB receive buffer (circular) ($A400-$B3FF)
+SCREEN_SAVE     = $A600         ; 1KB screen save buffer ($A600-$A9FF)
+                                ; (must be past IOBUF which ends at $A5FF)
+RECV_BUFFER     = $AA00         ; 4KB receive buffer (circular) ($AA00-$B9FF)
 RECV_BUF_SIZE   = $1000         ; 4096 bytes
 RECV_BUF_MASK   = $0FFF         ; Mask for wrap-around
 
@@ -110,6 +111,21 @@ ARYTAB          = $6B
 STREND          = $6D
 PRGEND          = $AF           ; End of program pointer (needed for editing)
 BASIC_START     = $0801
+
+; BASIC error variables (for automatic error detection)
+ERRNUM          = $DE           ; Error code (set by ONERR)
+ERRLIN          = $DA           ; Error line number low byte
+ERRLIN_H        = $DB           ; Error line number high byte
+ERRFLG          = $D8           ; Bit 7 = ONERR active
+CURLIN          = $75           ; Current line ($FF,$FF = immediate mode)
+CURLIN_H        = $76
+ERR_LASTNUM     = $222          ; Last error number (simpler to use)
+
+; ONERR hook (Phase 2b - natural language at BASIC prompt)
+BASIC_INPUT_BUF = $200          ; Applesoft input buffer
+KSWL            = $38           ; Keyboard input vector (low)
+KSWH            = $39           ; Keyboard input vector (high)
+ERR_SYNTAX      = 16            ; SYNTAX ERROR code
 
 ; Text screen
 TEXTPAGE        = $0400
@@ -305,12 +321,165 @@ install_hook:
 ;-------------------------------------------------------------------------------
 ampersand_entry:
         lda in_ui
-        bne @exit
+        beq @not_in_ui
+        rts                     ; Already in UI, exit
+@not_in_ui:
+        ; Phase 2b: Check if this was auto-triggered by error intercept
+        ; (KSWL hook stuffed & after an immediate-mode error)
+        lda error_intercept_flag
+        beq @not_intercepted
 
+        ; Error was intercepted! Use saved input buffer
+        jsr copy_saved_input
+        lda #0
+        sta error_intercept_flag
+        sta kbd_stuff_state
+
+        ; If input is empty, skip to normal UI
+        lda input_len
+        bne @send_intercepted
+        jmp @normal_ui
+
+@send_intercepted:
+        ; Intercepted natural language! Enter UI and send to Claude
         lda #1
         sta in_ui
         jsr save_screen
-        jsr main_ui
+
+        jsr HOME
+
+        ; Initialize output tracking
+        lda #OUTPUT_START
+        sta output_row
+        lda #0
+        sta output_col
+        sta lines_since_pause
+
+        ; Print header
+        ldax #ui_header
+        jsr print
+        jsr print_cr
+
+        ; Show what we're sending
+        ldax #msg_nl_sending
+        jsr print
+        jsr print_cr
+        ldax #input_buffer
+        jsr print
+        jsr print_cr
+        jsr print_cr
+
+        ; Send the message to Claude
+        jsr send_chat
+
+        ; Clear input for next interaction
+        lda #0
+        sta input_len
+
+        ; Wait for keypress before returning to BASIC
+        jsr print_cr
+        ldax #msg_press_key
+        jsr print
+        jsr RDKEY
+
+        ; Restore screen and return to BASIC
+        jsr restore_screen
+        lda #0
+        sta in_ui
+        rts
+
+@not_intercepted:
+        ; Phase 1: Check for BASIC errors by scanning screen
+        jsr check_basic_error
+
+        ; If error was detected (input_len > 0), send it immediately
+        lda input_len
+        beq @normal_ui
+
+        ; Error detected! Send it to agent automatically
+        lda #1
+        sta in_ui
+        jsr save_screen
+
+        ; Set up the UI
+        jsr HOME
+
+        ; Initialize output tracking
+        lda #OUTPUT_START
+        sta output_row
+        lda #0
+        sta output_col
+        sta lines_since_pause
+
+        ; Print header
+        ldax #ui_header
+        jsr print
+        jsr print_cr
+
+        ; Show what error we detected
+        ldax #msg_error_detected
+        jsr print
+        jsr print_cr
+
+        ; Show the error message we're sending
+        ldax #input_buffer
+        jsr print
+        jsr print_cr
+        jsr print_cr
+
+        ; Send the error to agent (this will display response)
+        jsr send_chat
+
+        ; Clear input for next interaction
+        lda #0
+        sta input_len
+
+        ; Now go to normal main loop for continued interaction
+        jmp @enter_main_loop
+
+@normal_ui:
+        lda #1
+        sta in_ui
+        jsr save_screen
+        jsr HOME
+
+        ; Initialize output tracking
+        lda #OUTPUT_START
+        sta output_row
+        lda #0
+        sta output_col
+        sta lines_since_pause
+
+        ; Print header
+        ldax #ui_header
+        jsr print
+        jsr print_cr
+
+@enter_main_loop:
+        ; Main loop - shared by error path and normal path
+        jsr print_cr
+        ldax #prompt_str
+        jsr print
+        jsr get_input
+        bcs @check_esc
+
+        lda input_len
+        beq @enter_main_loop
+
+        jsr process_input
+        jmp @enter_main_loop
+
+@check_esc:
+        cmp #$9B
+        beq @show_menu
+        cmp #$1B
+        beq @show_menu
+        jmp @enter_main_loop
+
+@show_menu:
+        jsr show_menu
+        bcc @enter_main_loop
+        ; Exit requested - restore screen and return
         jsr restore_screen
         lda #0
         sta in_ui
@@ -318,7 +487,335 @@ ampersand_entry:
 @exit:
         rts
 
+msg_error_detected:
+        .byte "DETECTED ERROR - ASKING AGENT...", 0
+
 ;-------------------------------------------------------------------------------
+; Check for BASIC error by scanning screen for "?" error messages
+; Scans text screen memory for lines starting with "?"
+;-------------------------------------------------------------------------------
+check_basic_error:
+        ; Scan screen lines for "?" at start (error indicator)
+        ; Screen lines are at: $400, $480, $500, $580, $600, $680, $700, $780
+        ;                      $428, $4A8, $528, $5A8, $628, $6A8, $728, $7A8
+        ;                      $450, $4D0, $550, $5D0, $650, $6D0, $750, $7D0
+
+        ; Check the most recent lines (bottom of screen) first
+        ; Line 23 = $7D0, Line 22 = $750, Line 21 = $6D0, etc.
+
+        ldx #23                 ; Start from bottom line
+@scan_line:
+        jsr get_screen_line_addr  ; Get line address in src_ptr
+        ldy #0
+        lda (src_ptr),y         ; Get first char
+        and #$7F                ; Clear high bit (normal/inverse)
+        cmp #'?'                ; Error indicator?
+        beq @found_error
+        dex
+        bpl @scan_line
+        ; No error found
+        rts
+
+@found_error:
+        ; Found "?" - copy the error message to input_buffer
+        ; Format: "FIX: " + error text from screen
+        ldy #0
+
+        ; Add "FIX: " prefix
+        lda #'F'
+        sta input_buffer,y
+        iny
+        lda #'I'
+        sta input_buffer,y
+        iny
+        lda #'X'
+        sta input_buffer,y
+        iny
+        lda #':'
+        sta input_buffer,y
+        iny
+        lda #' '
+        sta input_buffer,y
+        iny
+
+        ; Copy error text from screen (skip the "?")
+        sty temp2               ; Save position
+        ldy #1                  ; Start after "?"
+@copy_error:
+        lda (src_ptr),y
+        and #$7F                ; Clear high bit
+        cmp #$20                ; Space or control char at end?
+        bcc @end_copy           ; Control char = end
+        ; Store character
+        pha
+        tya
+        clc
+        adc temp2
+        tax
+        pla
+        sta input_buffer-1,x    ; -1 because temp2 already has offset
+        iny
+        cpy #35                 ; Max error length
+        bcc @copy_error
+
+@end_copy:
+        ; Calculate final length
+        tya
+        clc
+        adc temp2
+        sec
+        sbc #1                  ; Adjust for offset
+        sta input_len
+
+        ; Null terminate
+        tax
+        lda #0
+        sta input_buffer,x
+
+        rts
+
+;-------------------------------------------------------------------------------
+; Get screen line address for line X (0-23)
+; Returns address in src_ptr
+;-------------------------------------------------------------------------------
+get_screen_line_addr:
+        ; Screen line address table (low bytes)
+        ; Lines are not contiguous in memory
+        lda screen_addr_lo,x
+        sta src_ptr
+        lda screen_addr_hi,x
+        sta src_ptr+1
+        rts
+
+; Screen line address lookup tables
+screen_addr_lo:
+        .byte <$400, <$480, <$500, <$580, <$600, <$680, <$700, <$780
+        .byte <$428, <$4A8, <$528, <$5A8, <$628, <$6A8, <$728, <$7A8
+        .byte <$450, <$4D0, <$550, <$5D0, <$650, <$6D0, <$750, <$7D0
+
+screen_addr_hi:
+        .byte >$400, >$480, >$500, >$580, >$600, >$680, >$700, >$780
+        .byte >$428, >$4A8, >$528, >$5A8, >$628, >$6A8, >$728, >$7A8
+        .byte >$450, >$4D0, >$550, >$5D0, >$650, >$6D0, >$750, >$7D0
+
+;===============================================================================
+; Phase 2b: ROM Patch - Natural Language at BASIC Prompt
+;
+; Patches the Applesoft error handler at $D412 (in Language Card RAM)
+; to intercept immediate-mode errors. When user types natural language
+; at the ] prompt, BASIC gets SYNTAX ERROR. Our patched handler:
+; 1. Checks CURLIN=$FFFF (immediate mode)
+; 2. Saves the input buffer at $200
+; 3. Sets error_intercept_flag
+; 4. JMPs to $E003 (warm start) to cleanly return to ] prompt
+; 5. KSWL hook auto-stuffs & to trigger ampersand_entry
+; 6. ampersand_entry sends the saved input to Claude
+;===============================================================================
+
+; Language Card soft switches
+LCRAM_RW        = $C083         ; Read twice: LC bank 2 read + write
+LCRAM_RO        = $C080         ; Read: LC bank 2 read, write-protect
+LCRAM_ROM_WR    = $C081         ; Read twice: read ROM, write LC bank 2
+LCRAM_ROM       = $C082         ; Read ROM, write-protect LC
+BASIC_WARM      = $E003         ; Applesoft warm start (] prompt)
+
+; Error handler patch location
+ERR_HANDLER     = $D412         ; Applesoft error handler entry point
+ERR_HANDLER_ORIG_SIZE = 3       ; We patch 3 bytes (BIT $D8; BPL ...)
+
+;-------------------------------------------------------------------------------
+; Patch the Applesoft error handler at $D412
+; Replaces "BIT $D8; BPL +3" with "JMP error_intercept"
+; Original bytes: 24 D8 10
+;-------------------------------------------------------------------------------
+patch_error_handler:
+        ; Step 1: Copy ROM ($D000-$FFFF) to LC bank 2 RAM
+        ; LC bank 2 may not have ROM content, so we must copy it first.
+        ; Use $C081 mode: reads come from ROM, writes go to LC bank 2.
+        lda LCRAM_ROM_WR        ; read ROM, write LC bank 2
+        lda LCRAM_ROM_WR        ; (must read soft switch twice)
+
+        lda #$D0
+        sta src_ptr+1
+        lda #$00
+        sta src_ptr
+        tay                     ; Y = 0
+@copy_page:
+        lda (src_ptr),y         ; read from ROM
+        sta (src_ptr),y         ; write to LC bank 2
+        iny
+        bne @copy_page
+        inc src_ptr+1
+        bne @copy_page          ; loops until high byte wraps $FF->$00
+
+        ; Step 2: Switch to LC bank 2 read+write for patching
+        lda LCRAM_RW
+        lda LCRAM_RW
+
+        ; Save original 3 bytes at $D412 (now in LC, same as ROM)
+        lda ERR_HANDLER
+        sta orig_err_byte0
+        lda ERR_HANDLER+1
+        sta orig_err_byte1
+        lda ERR_HANDLER+2
+        sta orig_err_byte2
+
+        ; Patch with JMP error_intercept
+        lda #$4C
+        sta ERR_HANDLER
+        lda #<error_intercept
+        sta ERR_HANDLER+1
+        lda #>error_intercept
+        sta ERR_HANDLER+2
+
+        ; Write-protect LC RAM (keep LC bank 2 mapped for reads)
+        lda LCRAM_RO
+        rts
+
+;-------------------------------------------------------------------------------
+; Restore the original Applesoft error handler at $D412
+;-------------------------------------------------------------------------------
+restore_error_handler:
+        ; Restore original bytes in LC bank 2
+        lda LCRAM_RW
+        lda LCRAM_RW
+        lda orig_err_byte0
+        sta ERR_HANDLER
+        lda orig_err_byte1
+        sta ERR_HANDLER+1
+        lda orig_err_byte2
+        sta ERR_HANDLER+2
+        ; Switch back to ROM reads (unpatch)
+        lda LCRAM_ROM
+        rts
+
+;-------------------------------------------------------------------------------
+; Install KSWL hook for auto-stuffing & after intercepted errors
+;-------------------------------------------------------------------------------
+install_kswl_hook:
+        lda KSWL
+        sta saved_kswl
+        sta saved_kswl_vec
+        lda KSWH
+        sta saved_kswh
+        sta saved_kswl_vec+1
+        lda #<kswl_hook
+        sta KSWL
+        lda #>kswl_hook
+        sta KSWH
+        rts
+
+;-------------------------------------------------------------------------------
+; Restore original KSWL handler
+;-------------------------------------------------------------------------------
+restore_kswl:
+        lda saved_kswl
+        sta KSWL
+        lda saved_kswh
+        sta KSWH
+        rts
+
+;-------------------------------------------------------------------------------
+; Error intercept - called from patched $D412
+; Entry: X = error code (from Applesoft)
+; For immediate-mode errors: save input, set flag, go to warm start
+; For all other cases: execute the original error handler code
+;-------------------------------------------------------------------------------
+error_intercept:
+        ; Check if immediate mode: only CURLIN_H ($76) is set to $FF
+        ; (Applesoft does NOT set CURLIN_L for immediate mode)
+        lda CURLIN_H
+        cmp #$FF
+        bne @not_immediate
+
+        ; Immediate mode error - save input buffer before warm start
+        stx temp1
+        jsr save_input_buf_200
+        lda #1
+        sta error_intercept_flag
+        lda #0
+        sta kbd_stuff_state
+        jmp BASIC_WARM
+
+@not_immediate:
+        ; Not immediate mode - execute original error handler
+        bit $D8
+        bpl @no_onerr
+        jmp $F2E9
+@no_onerr:
+        jmp $D419
+
+;-------------------------------------------------------------------------------
+; KSWL hook - auto-stuffs & + CR when error_intercept_flag is set
+;-------------------------------------------------------------------------------
+kswl_hook:
+        lda error_intercept_flag
+        beq @passthrough
+
+        lda kbd_stuff_state
+        bne @stuff_cr
+
+        ; State 0: Return & character
+        inc kbd_stuff_state
+        lda #($26 | $80)
+        rts
+
+@stuff_cr:
+        ; State 1: Return CR
+        lda #0
+        sta kbd_stuff_state
+        lda #$8D
+        rts
+
+@passthrough:
+        jmp (saved_kswl_vec)
+
+saved_kswl_vec:
+        .word $0000
+
+;-------------------------------------------------------------------------------
+; Save BASIC input buffer ($200) to saved_input_buf
+;-------------------------------------------------------------------------------
+save_input_buf_200:
+        ldy #0
+@loop:
+        lda BASIC_INPUT_BUF,y
+        sta saved_input_buf,y
+        beq @done
+        cmp #$8D
+        beq @done_cr
+        iny
+        cpy #MAX_INPUT
+        bcc @loop
+        bcs @done
+@done_cr:
+        lda #0
+        sta saved_input_buf,y
+@done:
+        sty saved_input_len
+        rts
+
+;-------------------------------------------------------------------------------
+; Copy saved input buffer to input_buffer (for send_chat)
+;-------------------------------------------------------------------------------
+copy_saved_input:
+        ldy #0
+@loop:
+        lda saved_input_buf,y
+        beq @done
+        and #$7F
+        cmp #$20
+        bcc @done
+        sta input_buffer,y
+        iny
+        cpy #MAX_INPUT
+        bcc @loop
+@done:
+        sty input_len
+        lda #0
+        sta input_buffer,y
+        rts
+
 ; Save text screen
 ;-------------------------------------------------------------------------------
 save_screen:
@@ -858,20 +1355,33 @@ handle_command:
 
 @suspend:
         ; Install hooks so user can return to agent
-        ; Ctrl-Y hook: JMP start
+        ; Ctrl-Y hook: JMP ampersand_entry
         lda #$4C             ; JMP opcode
         sta CTRLY_VECTOR
-        lda #<start
+        lda #<ampersand_entry
         sta CTRLY_VECTOR+1
-        lda #>start
+        lda #>ampersand_entry
         sta CTRLY_VECTOR+2
-        ; & hook: JMP start
+        ; & hook: JMP ampersand_entry
         lda #$4C             ; JMP opcode
         sta AMPER_VECTOR
-        lda #<start
+        lda #<ampersand_entry
         sta AMPER_VECTOR+1
-        lda #>start
+        lda #>ampersand_entry
         sta AMPER_VECTOR+2
+
+        ; Clear in_ui flag so ampersand hook works
+        lda #0
+        sta in_ui
+        sta error_intercept_flag
+        sta kbd_stuff_state
+
+        ; Phase 2b: Patch error handler in Language Card RAM
+        ; This intercepts immediate-mode errors (natural language at ] prompt)
+        jsr patch_error_handler
+
+        ; Phase 2b: Install KSWL hook for auto-stuffing & after errors
+        jsr install_kswl_hook
 
         ; Show message and drop to BASIC
         jsr HOME
@@ -3106,7 +3616,8 @@ msg_suspended:
         .byte "SUSPENDED TO BASIC.", 13
         .byte "YOUR CODE IS LOADED - TYPE RUN", 13
         .byte 13
-        .byte "TO RESUME: CTRL-Y OR &", 13, 0
+        .byte "TO RESUME: CTRL-Y OR &", 13
+        .byte "NATURAL LANGUAGE: JUST TYPE!", 13, 0
 
 model_sonnet:
         .byte "SONNET", 0
@@ -3152,6 +3663,13 @@ menu_text:
         .byte "3. SHOW IP CONFIG", 13
         .byte "4. EXIT TO BASIC", 13
         .byte "CHOICE (1-4): ", 0
+
+;-------------------------------------------------------------------------------
+; Phase 2b RODATA
+;-------------------------------------------------------------------------------
+
+msg_nl_sending:
+        .byte ">> SENDING TO CLAUDE...", 0
 
 ;-------------------------------------------------------------------------------
 ; ProDOS MLI Parameter Blocks (in DATA segment - must be writable)
@@ -3278,6 +3796,11 @@ port_hi:        .res 1
 in_callback:       .res 1       ; Non-zero if inside recv_callback
 recv_pkt_count:    .res 1       ; Count of callback invocations (debug)
 
+; Error detection (for smart & handler)
+detected_error:    .res 1       ; Non-zero if error was detected
+detected_err_code: .res 1       ; Error code (0-255)
+detected_err_line: .res 2       ; Line number where error occurred
+
 ; Deferred ACK handling (avoid tcp_send during recv_callback)
 pending_ack_count: .res 1       ; Number of pending ACKs
 pending_acks:      .res 8       ; Sequence numbers to ACK
@@ -3285,6 +3808,17 @@ ack_seq_temp:      .res 1       ; Temp for send_ack_for_seq
 ack_batch_count:   .res 1       ; Number of ACKs to send in batch
 ack_batch_pos:     .res 1       ; Current position in batch buffer
 ack_batch_buffer:  .res 64      ; Buffer for up to 8 ACK packets (8 bytes each)
+
+; Phase 2b: ROM patch / error intercept state
+error_intercept_flag: .res 1    ; 1 = immediate-mode error intercepted
+kbd_stuff_state:   .res 1       ; KSWL hook state (0=send &, 1=send CR)
+saved_kswl:        .res 1       ; Original keyboard vector (low)
+saved_kswh:        .res 1       ; Original keyboard vector (high)
+orig_err_byte0:    .res 1       ; Saved byte from $D412
+orig_err_byte1:    .res 1       ; Saved byte from $D413
+orig_err_byte2:    .res 1       ; Saved byte from $D414
+saved_input_buf:   .res 128     ; Saved copy of $200 input buffer
+saved_input_len:   .res 1       ; Length of saved input
 
 ; ProDOS I/O buffer (must be page-aligned, 1024 bytes)
 ; Placed in separate IOBUF segment to ensure alignment
