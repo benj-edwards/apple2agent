@@ -389,13 +389,28 @@ ampersand_entry:
         rts
 
 @not_intercepted:
-        ; Phase 1: Check for BASIC errors by scanning screen
+        ; Phase 3: Check if auto-triggered by program error
+        lda program_error_flag
+        beq @not_program_error
+        lda #0
+        sta program_error_flag
+        sta kbd_stuff_state
+        ; Reuse Phase 1 screen scan to read the error message
+        jsr check_basic_error
+        lda input_len
+        beq @normal_ui
+        ; Found error on screen - send to Claude (reuse Phase 1 path)
+        jmp @error_send
+
+@not_program_error:
+        ; Phase 1: Manual & press - check for BASIC errors
         jsr check_basic_error
 
         ; If error was detected (input_len > 0), send it immediately
         lda input_len
         beq @normal_ui
 
+@error_send:
         ; Error detected! Send it to agent automatically
         lda #1
         sta in_ui
@@ -743,32 +758,66 @@ error_intercept:
         bpl @no_onerr
         jmp $F2E9
 @no_onerr:
-        jmp $D419
-
-;-------------------------------------------------------------------------------
-; KSWL hook - auto-stuffs & + CR when error_intercept_flag is set
-;-------------------------------------------------------------------------------
-kswl_hook:
-        lda error_intercept_flag
-        beq @passthrough
-
-        lda kbd_stuff_state
-        bne @stuff_cr
-
-        ; State 0: Return & character
-        inc kbd_stuff_state
-        lda #($26 | $80)
-        rts
-
-@stuff_cr:
-        ; State 1: Return CR
+        ; Phase 3: Auto-invoke agent for program errors
+        ; Skip BREAK (255) and REENTER (254) - intentional/non-error stops
+        cpx #255
+        beq @no_phase3
+        cpx #254
+        beq @no_phase3
+        lda #1
+        sta program_error_flag
         lda #0
         sta kbd_stuff_state
-        lda #$8D
-        rts
+@no_phase3:
+        jmp $D419           ; Normal handler prints error, returns to ]
 
-@passthrough:
-        jmp (saved_kswl_vec)
+;-------------------------------------------------------------------------------
+; KSWL hook - keepalive polling + auto-stuffs & + CR for error flags
+;-------------------------------------------------------------------------------
+kswl_hook:
+        ; Phase 2b: auto-stuff & after immediate-mode error
+        lda error_intercept_flag
+        bne @stuff_ampersand
+
+        ; Phase 3: auto-stuff & after program error
+        lda program_error_flag
+        bne @stuff_ampersand
+
+        ; No flags - enter keepalive polling loop
+        ; Sit here checking keyboard + polling network periodically
+@poll_loop:
+        lda $C000               ; Check keyboard
+        bmi @key_ready          ; Bit 7 set = key available
+        inc poll_counter_lo
+        bne @poll_loop
+        inc poll_counter_hi
+        bne @poll_loop
+        ; Both wrapped (~65536 iterations, roughly 1 sec at 1MHz)
+        txa
+        pha
+        tya
+        pha
+        jsr ip65_process        ; Keep TCP connection alive
+        pla
+        tay
+        pla
+        tax
+        jmp @poll_loop
+
+@key_ready:
+        jmp (saved_kswl_vec)    ; Original handler reads the key
+
+@stuff_ampersand:
+        lda kbd_stuff_state
+        bne @stuff_cr
+        inc kbd_stuff_state
+        lda #($26 | $80)       ; & with high bit
+        rts
+@stuff_cr:
+        lda #0
+        sta kbd_stuff_state
+        lda #$8D               ; CR
+        rts
 
 saved_kswl_vec:
         .word $0000
@@ -1375,6 +1424,9 @@ handle_command:
         sta in_ui
         sta error_intercept_flag
         sta kbd_stuff_state
+        sta program_error_flag
+        sta poll_counter_lo
+        sta poll_counter_hi
 
         ; Phase 2b: Patch error handler in Language Card RAM
         ; This intercepts immediate-mode errors (natural language at ] prompt)
@@ -3617,7 +3669,8 @@ msg_suspended:
         .byte "YOUR CODE IS LOADED - TYPE RUN", 13
         .byte 13
         .byte "TO RESUME: CTRL-Y OR &", 13
-        .byte "NATURAL LANGUAGE: JUST TYPE!", 13, 0
+        .byte "NATURAL LANGUAGE: JUST TYPE!", 13
+        .byte "ERRORS AUTO-SENT TO CLAUDE", 13, 0
 
 model_sonnet:
         .byte "SONNET", 0
@@ -3812,6 +3865,9 @@ ack_batch_buffer:  .res 64      ; Buffer for up to 8 ACK packets (8 bytes each)
 ; Phase 2b: ROM patch / error intercept state
 error_intercept_flag: .res 1    ; 1 = immediate-mode error intercepted
 kbd_stuff_state:   .res 1       ; KSWL hook state (0=send &, 1=send CR)
+program_error_flag: .res 1      ; 1 = program error, auto-invoke agent
+poll_counter_lo:    .res 1      ; Network poll timing (low byte)
+poll_counter_hi:    .res 1      ; Network poll timing (high byte)
 saved_kswl:        .res 1       ; Original keyboard vector (low)
 saved_kswh:        .res 1       ; Original keyboard vector (high)
 orig_err_byte0:    .res 1       ; Saved byte from $D412
