@@ -708,16 +708,33 @@ restore_error_handler:
 ; Install KSWL hook for auto-stuffing & after intercepted errors
 ;-------------------------------------------------------------------------------
 install_kswl_hook:
+        ; Check if already installed (avoid saving our own address)
+        lda KSWL
+        cmp #<kswl_hook
+        bne @not_installed
+        lda KSWH
+        cmp #>kswl_hook
+        beq @done               ; Already installed
+@not_installed:
         lda KSWL
         sta saved_kswl
         sta saved_kswl_vec
         lda KSWH
         sta saved_kswh
         sta saved_kswl_vec+1
+        ; If original was $0000, point to our own key reader
+        ora saved_kswl_vec
+        bne @set_hook
+        lda #<builtin_keyin
+        sta saved_kswl_vec
+        lda #>builtin_keyin
+        sta saved_kswl_vec+1
+@set_hook:
         lda #<kswl_hook
         sta KSWL
         lda #>kswl_hook
         sta KSWH
+@done:
         rts
 
 ;-------------------------------------------------------------------------------
@@ -821,6 +838,15 @@ kswl_hook:
 
 saved_kswl_vec:
         .word $0000
+
+;-------------------------------------------------------------------------------
+; Builtin key reader - fallback when original KSWL was $0000
+;-------------------------------------------------------------------------------
+builtin_keyin:
+        lda $C000
+        bpl builtin_keyin
+        bit $C010               ; Clear keyboard strobe
+        rts
 
 ;-------------------------------------------------------------------------------
 ; Save BASIC input buffer ($200) to saved_input_buf
