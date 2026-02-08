@@ -149,7 +149,7 @@ def free_file_blocks(disk_data, storage_type, key_block):
         index = read_block(disk_data, key_block)
         freed = 0
         for i in range(256):
-            data_block = index[i]
+            data_block = index[i] | (index[256 + i] << 8)
             if data_block != 0:
                 mark_block_free(disk_data, data_block)
                 freed += 1
@@ -160,11 +160,11 @@ def free_file_blocks(disk_data, storage_type, key_block):
         master = read_block(disk_data, key_block)
         freed = 0
         for i in range(256):
-            sub_block = master[i]
+            sub_block = master[i] | (master[256 + i] << 8)
             if sub_block != 0:
                 subindex = read_block(disk_data, sub_block)
                 for j in range(256):
-                    data_block = subindex[j]
+                    data_block = subindex[j] | (subindex[256 + j] << 8)
                     if data_block != 0:
                         mark_block_free(disk_data, data_block)
                         freed += 1

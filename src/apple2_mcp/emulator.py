@@ -541,6 +541,27 @@ class Emulator:
         self.debugger_command(cmd, stay_in_debugger=False)
         return True
 
+    def load(self, address: int, hex_data: str) -> int:
+        """Load hex data into memory. More efficient than poke for large blocks.
+
+        Args:
+            address: Starting address
+            hex_data: Hex string (e.g., "A9008D0008")
+
+        Returns:
+            Number of bytes loaded
+        """
+        if self.control_socket:
+            try:
+                return self.control_socket.load(address, hex_data)
+            except ControlSocketError as e:
+                raise BobbinError(f"Control socket error: {e}")
+
+        # Fall back to poke via debugger
+        data = bytes.fromhex(hex_data.replace(' ', ''))
+        self.poke(address, list(data))
+        return len(data)
+
     def read_screen_memory(self) -> dict[int, int]:
         """Read the entire text screen memory.
 

@@ -15,6 +15,7 @@ import json
 import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import Optional, Callable, Dict, List, Any
 
 # Try to import anthropic
@@ -387,6 +388,9 @@ class AgenticClaude:
         # Custom prompt - user can set additional context/instructions
         self.custom_prompt: Optional[str] = None
 
+        # Track last user message for checkpoint descriptions
+        self._last_user_message: str = ""
+
     def set_custom_prompt(self, prompt: Optional[str]) -> None:
         """Set a custom prompt that will be appended to the system prompt."""
         self.custom_prompt = prompt
@@ -394,6 +398,36 @@ class AgenticClaude:
     def clear_custom_prompt(self) -> None:
         """Clear the custom prompt."""
         self.custom_prompt = None
+
+    def _checkpoint_program(self, source: str, description: str):
+        """Auto-save program version to git for undo/versioning."""
+        try:
+            programs_dir = Path(__file__).parent.parent / "programs"
+            programs_dir.mkdir(exist_ok=True)
+
+            # Init git repo if needed
+            git_dir = programs_dir / ".git"
+            if not git_dir.exists():
+                subprocess.run(["git", "init"], cwd=programs_dir,
+                             capture_output=True, timeout=10)
+                subprocess.run(["git", "config", "user.email", "agent@apple2"],
+                             cwd=programs_dir, capture_output=True, timeout=10)
+                subprocess.run(["git", "config", "user.name", "Apple II Agent"],
+                             cwd=programs_dir, capture_output=True, timeout=10)
+
+            # Save source
+            program_file = programs_dir / "current.bas"
+            program_file.write_text(source)
+
+            # Auto-commit
+            subprocess.run(["git", "add", "current.bas"], cwd=programs_dir,
+                         capture_output=True, timeout=10)
+            subprocess.run(["git", "commit", "-m", description[:72],
+                          "--allow-empty-message"],
+                         cwd=programs_dir, capture_output=True, timeout=10)
+            print(f"[Checkpoint] {description[:72]}")
+        except Exception as e:
+            print(f"[Checkpoint] Error: {e}")
 
     def _execute_tool(self, tool_name: str, tool_input: dict) -> str:
         """Execute a tool and return the result."""
@@ -446,6 +480,8 @@ class AgenticClaude:
                     }
                     result = self.mcp_call("mcp__apple2-mcp__inject_tokenized_basic", inject_input)
                     self.send_status("PROGRAM LOADED")
+                    # Checkpoint the program
+                    self._checkpoint_program(source, f"Emulator test: {self._last_user_message[:60]}")
                     return str(result)
 
                 elif tool_name == "emulator_capture_graphics":
@@ -520,6 +556,8 @@ class AgenticClaude:
             finally:
                 self._heartbeat_paused = False
             self.send_status("CODE DEPLOYED!")
+            # Checkpoint the program
+            self._checkpoint_program(source, f"Deploy: {self._last_user_message[:60]}")
             return "Code sent to Apple II"
 
         elif tool_name == "apple2_send_message":
@@ -602,6 +640,8 @@ class AgenticClaude:
                         "program_name": filename,
                         "source": source
                     })
+                    # Checkpoint the program
+                    self._checkpoint_program(source, f"Disk save: {filename}")
                     return f"Saved BASIC program '{filename}' to disk. User can BRUN {filename} or - {filename}"
                 else:
                     return "ERROR: Disk operations not available (no MCP connection)"
@@ -905,6 +945,9 @@ Be concise but preserve important technical details."""
         """
         if not self.client:
             return "ERROR: No API key. Export ANTHROPIC_API_KEY."
+
+        # Track last user message for checkpoint descriptions
+        self._last_user_message = user_message
 
         # Add user message to conversation
         self.conversation.append({

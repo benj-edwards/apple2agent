@@ -5,6 +5,7 @@ build/
 
 # Bobbin emulator (build from source or download)
 bobbin/src/bobbin
+bobbin/src/bobbin-old
 
 # Apple II ROMs (copyrighted - obtain separately)
 bobbin/src/roms/
@@ -33,6 +34,13 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Dev notes (session scratch)
+NETWORK_DEBUGGING.md
+TOOLCHAIN_ANALYSIS.md
+applesoft_plan.md
+dungeonquest.md
+mud_notes.md
 
 # Claude artifacts
 .claude/

@@ -1559,8 +1559,15 @@ async def _call_tool_impl(name: str, args: dict[str, Any]) -> str:
         # Calculate end address
         end_addr = load_addr + len(data)
 
-        # Write the tokenized BASIC to memory using poke (uses control socket if available)
-        emu.poke(load_addr, list(data))
+        # Write tokenized BASIC to memory in chunks using load (hex string).
+        # The control socket has an 8KB command buffer. Using load with hex
+        # strings is much more compact than poke with JSON integer arrays.
+        # 2KB of binary = 4KB hex string + ~40 bytes overhead = fits in 8KB.
+        CHUNK_SIZE = 2048
+        for offset in range(0, len(data), CHUNK_SIZE):
+            chunk = data[offset:offset + CHUNK_SIZE]
+            chunk_hex = chunk.hex()
+            emu.load(load_addr + offset, chunk_hex)
 
         # Update BASIC pointers using poke
         # TXTTAB ($67-68) = start of program

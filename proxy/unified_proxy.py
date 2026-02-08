@@ -29,10 +29,12 @@ import os
 import sys
 import socket
 import select
+import subprocess
 import threading
 import argparse
 import time
 import re
+from pathlib import Path
 from typing import Optional, Callable, Dict
 
 # Force unbuffered output for logging
@@ -538,6 +540,8 @@ class AppleIISession:
                 "/CODE <DESC> - MAKE BASIC\n"
                 "/CHAT <MSG> - JUST CHAT\n"
                 "/TURNS <N> - MAX TURNS\n"
+                "/UNDO - RESTORE PREV CODE\n"
+                "/VERSIONS - SHOW HISTORY\n"
                 "/IP - CONNECTION INFO"
             )
         elif command == 'SUSPEND':
@@ -597,6 +601,10 @@ class AppleIISession:
                 # Also clear on agentic claude instance
                 if self.proxy and self.proxy.agentic_claude:
                     self.proxy.agentic_claude.clear_custom_prompt()
+        elif command == 'UNDO':
+            self._handle_undo()
+        elif command == 'VERSIONS':
+            self._handle_versions()
         elif command == 'IP':
             self._send_response(f"CONNECTED FROM {self.addr[0]}")
         elif command == 'MODEL':
@@ -618,6 +626,69 @@ class AppleIISession:
                 self._send_response(f"MODEL: {model_name.upper()}\nUSE /MODEL S|O|H TO CHANGE")
         else:
             self._send_response(f"UNKNOWN: {command}\nTYPE /HELP")
+
+    def _handle_undo(self):
+        """Handle /UNDO - restore previous program version."""
+        programs_dir = Path(__file__).parent.parent / "programs"
+        git_dir = programs_dir / ".git"
+        if not git_dir.exists():
+            self._send_response("NO PROGRAM HISTORY YET")
+            return
+        try:
+            # Check if there's a previous commit
+            result = subprocess.run(
+                ["git", "log", "--oneline", "-2"],
+                cwd=programs_dir, capture_output=True, text=True, timeout=10
+            )
+            lines = result.stdout.strip().split('\n')
+            if len(lines) < 2:
+                self._send_response("NO PREVIOUS VERSION")
+                return
+
+            # Restore previous version
+            subprocess.run(
+                ["git", "checkout", "HEAD~1", "--", "current.bas"],
+                cwd=programs_dir, capture_output=True, timeout=10
+            )
+            # Commit the revert
+            subprocess.run(
+                ["git", "add", "current.bas"],
+                cwd=programs_dir, capture_output=True, timeout=10
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "Undo: restored previous version"],
+                cwd=programs_dir, capture_output=True, timeout=10
+            )
+
+            # Read the restored source
+            program_file = programs_dir / "current.bas"
+            source = program_file.read_text()
+
+            # Re-deploy to Apple II
+            self._send_status("RESTORING PREVIOUS...")
+            self._send_basic_code(source)
+            self._send_response("RESTORED PREVIOUS VERSION\nTYPE /EXIT THEN RUN")
+        except Exception as e:
+            self._send_response(f"UNDO ERROR: {str(e)[:40]}")
+
+    def _handle_versions(self):
+        """Handle /VERSIONS - show program version history."""
+        programs_dir = Path(__file__).parent.parent / "programs"
+        git_dir = programs_dir / ".git"
+        if not git_dir.exists():
+            self._send_response("NO PROGRAM HISTORY YET")
+            return
+        try:
+            result = subprocess.run(
+                ["git", "log", "--oneline", "-10"],
+                cwd=programs_dir, capture_output=True, text=True, timeout=10
+            )
+            if result.stdout.strip():
+                self._send_response(f"PROGRAM VERSIONS:\n{result.stdout.strip().upper()}")
+            else:
+                self._send_response("NO PROGRAM HISTORY YET")
+        except Exception as e:
+            self._send_response(f"VERSIONS ERROR: {str(e)[:40]}")
 
     def _generate_code(self, prompt: str):
         """Generate and send BASIC code."""
