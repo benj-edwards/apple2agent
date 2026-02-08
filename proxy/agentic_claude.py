@@ -926,6 +926,25 @@ Be concise but preserve important technical details."""
         if hasattr(self, '_original_send_status'):
             self.send_status = self._original_send_status
 
+    def _shutdown_test_emulator(self):
+        """Shut down the bridge's test emulator to free CPU.
+
+        The bridge boots a separate Bobbin process for testing code.
+        We shut it down after each agentic loop so it doesn't eat CPU
+        while idle. The next test will auto-boot a fresh one.
+        """
+        if not self.mcp_call:
+            return
+        try:
+            # Import here to avoid circular imports
+            from emulator_bridge import get_bridge
+            bridge = get_bridge()
+            if bridge.emulator_running:
+                bridge.shutdown()
+                print("[Bridge] Test emulator shut down (CPU freed)")
+        except Exception:
+            pass
+
     def _heartbeat_loop(self):
         """Send periodic heartbeat dots when no other traffic is flowing."""
         while self._heartbeat_running:
@@ -1079,6 +1098,7 @@ You are the user's AI programming partner. Be FAST for simple stuff!"""
             return self._run_agentic_loop(model, system_prompt, max_turns)
         finally:
             self._stop_heartbeat()
+            self._shutdown_test_emulator()
 
     def _run_agentic_loop(self, model, system_prompt, max_turns):
         """Inner agentic loop (runs with heartbeat active)."""
