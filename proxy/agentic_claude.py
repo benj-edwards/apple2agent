@@ -953,7 +953,7 @@ Be concise but preserve important technical details."""
                                 result = block.get("content", "")[:500]
                                 old_text += f"TOOL RESULT: {result}...\n\n"
 
-            response = self.client.messages.create(
+            response = self._api_call_with_retry(
                 model=model,
                 max_tokens=2000,
                 messages=[{
@@ -984,6 +984,63 @@ Be concise but preserve important technical details."""
         except Exception as e:
             print(f"[Agent] Compaction failed: {e}")
             return False
+
+    def _api_call_with_retry(self, max_retries=3, **kwargs):
+        """Make an API call with retry for rate limits and overload."""
+        for attempt in range(max_retries + 1):
+            try:
+                return self.client.messages.create(**kwargs)
+            except anthropic.RateLimitError as e:
+                if attempt < max_retries:
+                    try:
+                        retry_after = int(e.response.headers.get('retry-after', 0))
+                    except (ValueError, AttributeError):
+                        retry_after = 0
+                    if retry_after < 1:
+                        retry_after = min(2 ** (attempt + 1), 60)
+                    self.send_status(f"RATE LIMITED - RETRY {retry_after}S")
+                    self._stream(f"  (rate limited, waiting {retry_after}s)")
+                    time.sleep(retry_after)
+                else:
+                    raise
+            except anthropic.APIStatusError as e:
+                if e.status_code == 529 and attempt < max_retries:
+                    wait = min(2 ** (attempt + 1), 60)
+                    self.send_status(f"API BUSY - RETRY {wait}S")
+                    self._stream(f"  (overloaded, waiting {wait}s)")
+                    time.sleep(wait)
+                else:
+                    raise
+        raise Exception("API call failed after retries")
+
+    def _prepare_cached_messages(self, messages):
+        """Add cache_control breakpoint to messages for prompt caching.
+
+        Marks the second-to-last message so everything before it is cached.
+        Each turn, only the newest content (last response + new message) is uncached.
+        """
+        if len(messages) < 4:
+            return messages
+
+        # Shallow copy list, modify only the target message
+        cached = list(messages)
+        idx = len(cached) - 2
+        target = cached[idx]
+        content = target.get("content", "")
+
+        if isinstance(content, str):
+            cached[idx] = {
+                **target,
+                "content": [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+            }
+        elif isinstance(content, list) and content:
+            new_content = list(content)
+            last_block = new_content[-1]
+            if isinstance(last_block, dict):
+                new_content[-1] = {**last_block, "cache_control": {"type": "ephemeral"}}
+                cached[idx] = {**target, "content": new_content}
+
+        return cached
 
     def _start_heartbeat(self):
         """Start background heartbeat thread to keep Apple II TCP alive.
@@ -1230,16 +1287,23 @@ You are the user's AI programming partner. Be FAST for simple stuff!"""
             self._compact_conversation(model)
 
             try:
-                # Include Anthropic's native web search tool
-                all_tools = APPLE2_TOOLS + [
-                    {"type": "web_search_20250305", "name": "web_search", "max_uses": 3}
-                ]
-                response = self.client.messages.create(
+                # Build tools with prompt caching on last regular tool
+                all_tools = list(APPLE2_TOOLS)
+                all_tools[-1] = {**all_tools[-1], "cache_control": {"type": "ephemeral"}}
+                all_tools.append({"type": "web_search_20250305", "name": "web_search", "max_uses": 3})
+
+                # System prompt with caching (static across all turns)
+                cached_system = [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}]
+
+                # Conversation with cache breakpoint on recent history
+                cached_messages = self._prepare_cached_messages(self.conversation)
+
+                response = self._api_call_with_retry(
                     model=model,
                     max_tokens=4096,
-                    system=system_prompt,
+                    system=cached_system,
                     tools=all_tools,
-                    messages=self.conversation,
+                    messages=cached_messages,
                     extra_headers={"anthropic-beta": "web-search-2025-03-05"}
                 )
 
@@ -1256,8 +1320,16 @@ You are the user's AI programming partner. Be FAST for simple stuff!"""
                 if usage:
                     in_tok = getattr(usage, 'input_tokens', 0)
                     out_tok = getattr(usage, 'output_tokens', 0)
-                    tok_str = f"{in_tok//1000}K IN {out_tok//1000}K OUT"
+                    cache_read = getattr(usage, 'cache_read_input_tokens', 0)
+                    cache_write = getattr(usage, 'cache_creation_input_tokens', 0)
+                    if cache_read:
+                        tok_str = f"{in_tok//1000}K+{cache_read//1000}KC IN {out_tok//1000}K OUT"
+                    else:
+                        tok_str = f"{in_tok//1000}K IN {out_tok//1000}K OUT"
                     self._stream(f"  THOUGHT {elapsed}S * {tok_str}")
+                    # Log cache effectiveness
+                    if cache_read or cache_write:
+                        print(f"[Agent] Cache: {cache_read} read, {cache_write} written, {in_tok} uncached")
 
                 # Process response
                 assistant_content = []
@@ -1388,6 +1460,9 @@ You are the user's AI programming partner. Be FAST for simple stuff!"""
                 if response.stop_reason != "tool_use":
                     break
 
+            except anthropic.RateLimitError:
+                self.send_status("RATE LIMITED")
+                return "ERROR: RATE LIMITED AFTER 3 RETRIES. WAIT A MINUTE AND TRY AGAIN."
             except Exception as e:
                 error_msg = str(e)
                 # Provide clean error messages for common API errors
@@ -1396,7 +1471,7 @@ You are the user's AI programming partner. Be FAST for simple stuff!"""
                     return "ERROR: API CREDITS DEPLETED. ADD CREDITS TO YOUR ANTHROPIC ACCOUNT."
                 elif "rate" in error_msg.lower() and "limit" in error_msg.lower():
                     self.send_status("RATE LIMITED")
-                    return "ERROR: API RATE LIMIT. PLEASE WAIT A MOMENT."
+                    return "ERROR: RATE LIMITED AFTER RETRIES. WAIT A MINUTE AND TRY AGAIN."
                 elif "authentication" in error_msg.lower() or "api_key" in error_msg.lower():
                     self.send_status("BAD API KEY")
                     return "ERROR: INVALID API KEY. CHECK ANTHROPIC_API_KEY."
