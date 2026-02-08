@@ -1012,7 +1012,7 @@ STATUS UPDATES - User sees these in real-time:
 - "DEPLOYING TO APPLE II..."
 - "READY! TYPE /EXIT THEN RUN"
 For complex programs:
-- "LOADING EMULATOR..."
+- "INSTANT LOAD..." (emulator_load_env)
 - "TESTING..."
 - "--- EMULATOR OUTPUT ---" (show what you see!)
 - "TEST PASSED!"
@@ -1136,7 +1136,7 @@ You are the user's AI programming partner. Be FAST for simple stuff!"""
                         if tool_name != "apple2_send_status":
                             friendly_names = {
                                 "emulator_boot": "BOOTING (SLOW)",
-                                "emulator_load_env": "LOADING EMULATOR",
+                                "emulator_load_env": "INSTANT LOAD",
                                 "emulator_type": "TYPING",
                                 "emulator_read_screen": "READING SCREEN",
                                 "emulator_run_basic": "RUNNING BASIC",
