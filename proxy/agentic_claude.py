@@ -422,6 +422,30 @@ class AgenticClaude:
             except Exception:
                 pass
 
+    def _stream_emulator_screen(self, result: str, max_lines: int = 6):
+        """Stream emulator screen content to Apple II output area.
+        Shows non-blank lines from the emulator screen so the user
+        can follow what the agent sees during testing."""
+        lines = result.strip().split('\n')
+        # Filter to non-blank lines
+        content_lines = [l.rstrip() for l in lines if l.strip()]
+        if not content_lines:
+            return
+
+        self._stream("  --- EMU ---")
+        shown = 0
+        for line in content_lines:
+            if shown >= max_lines:
+                remaining = len(content_lines) - shown
+                if remaining > 0:
+                    self._stream(f"  ({remaining} MORE)")
+                break
+            formatted = self._format_text(line)
+            for wrapped in self._word_wrap(formatted):
+                self._stream(f"  {wrapped}")
+            shown += 1
+        self._stream("  ---------")
+
     def _format_text(self, text: str) -> str:
         """Apply display case formatting."""
         return text.upper() if self.display_uppercase else text
@@ -1422,11 +1446,15 @@ You are the user's AI programming partner. Be FAST for simple stuff!"""
                         # Execute tool
                         result = self._execute_tool(tool_name, tool_input)
 
-                        # Stream abbreviated result (skip noise like send_status OK)
+                        # Stream tool result to Apple II
                         if result and tool_name != "apple2_send_status":
-                            result_preview = self._format_text(result.strip().split('\n')[0][:37])
-                            if result_preview and result_preview != "OK":
-                                self._stream(f"  {result_preview}")
+                            if tool_name in ('emulator_read_screen', 'emulator_run_basic'):
+                                # Show emulator screen content so user can follow along
+                                self._stream_emulator_screen(result)
+                            else:
+                                result_preview = self._format_text(result.strip().split('\n')[0][:37])
+                                if result_preview and result_preview != "OK":
+                                    self._stream(f"  {result_preview}")
 
                         # Add assistant message and tool result
                         self.conversation.append({

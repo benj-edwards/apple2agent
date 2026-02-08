@@ -427,6 +427,8 @@ ampersand_entry:
         lda #0
         sta output_col
         sta lines_since_pause
+        lda #1
+        sta more_enabled         ; [MORE] pagination on by default
 
         ; Print header
         ldax #ui_header
@@ -1567,10 +1569,22 @@ handle_command:
         rts
 
 @check_m:
-        ; /MODEL
+        ; /MODEL or /MORE (both start with M)
         cmp #'M'
         bne @check_d
+        lda input_buffer+2
+        jsr to_upper
+        cmp #'O'
+        bne @unknown
+        lda input_buffer+3
+        jsr to_upper
+        cmp #'R'
+        beq @more
+        ; Default to /MODEL for /MO + anything else
         jsr cmd_model
+        rts
+@more:
+        jsr cmd_more
         rts
 
 @check_d:
@@ -1979,6 +1993,51 @@ cmd_prompt:
         ; Server parses "/PROMPT text" and handles it
         ; If no argument, server will clear the prompt
         jsr send_chat
+        rts
+
+;-------------------------------------------------------------------------------
+; Command: /MORE [ON|OFF] - Toggle [MORE] pagination
+;-------------------------------------------------------------------------------
+cmd_more:
+        ; Check for argument at input_buffer+6 ("/MORE " = 6 chars)
+        lda input_buffer+6
+        beq @toggle              ; No arg - toggle current state
+        jsr to_upper
+        cmp #'O'
+        bne @show
+        ; ON or OFF? Check next char
+        lda input_buffer+7
+        jsr to_upper
+        cmp #'N'
+        beq @set_on
+        cmp #'F'
+        beq @set_off
+        jmp @show
+
+@toggle:
+        lda more_enabled
+        eor #1
+        sta more_enabled
+        jmp @show
+
+@set_on:
+        lda #1
+        sta more_enabled
+        jmp @show
+
+@set_off:
+        lda #0
+        sta more_enabled
+
+@show:
+        lda more_enabled
+        beq @show_off
+        ldax #msg_more_on
+        jsr print_status
+        rts
+@show_off:
+        ldax #msg_more_off
+        jsr print_status
         rts
 
 ;-------------------------------------------------------------------------------
@@ -3257,6 +3316,8 @@ output_char:
 ;-------------------------------------------------------------------------------
 do_scroll:
         ; Check pagination - pause after LINES_PER_PAGE lines
+        lda more_enabled
+        beq @no_pause            ; Skip if [MORE] disabled
         inc lines_since_pause
         lda lines_since_pause
         cmp #LINES_PER_PAGE
@@ -3272,18 +3333,10 @@ do_scroll:
         bcc @no_wrap
         beq @no_wrap
 
-        ; Wrap to top - don't output CR (would scroll into command area)
-        lda #OUTPUT_START
-        sta output_row
-
-        ; Redraw command area in case it was damaged
+        ; Wrap to top - clear output area for clean page
+        jsr clear_output_area
         jsr draw_command_area
-
-        ; Position at output row
-        lda output_row
-        sta CV
-        jsr VTAB
-        jsr CLREOL
+        ; Cursor already positioned at OUTPUT_START by clear_output_area
         rts
 
 @no_wrap:
@@ -3700,13 +3753,10 @@ scroll_output:
         bcc @no_wrap
         beq @no_wrap
 
-        ; Wrap to top
-        lda #OUTPUT_START
-        sta output_row
-
-        ; Redraw command area
+        ; Wrap to top - clear output area for clean page
+        jsr clear_output_area
         jsr draw_command_area
-        jmp @set_pos
+        rts
 
 @no_wrap:
         ; Only output CR if cursor is in output area (not at input line)
@@ -3928,6 +3978,11 @@ msg_port_8080:
 msg_unknown_cmd:
         .byte "UNKNOWN COMMAND - TYPE /HELP", 0
 
+msg_more_on:
+        .byte "[MORE] PAGINATION: ON", 0
+msg_more_off:
+        .byte "[MORE] PAGINATION: OFF", 0
+
 msg_ip_set:
         .byte "IP SET: ", 0
 
@@ -4009,6 +4064,7 @@ help_text:
         .byte "/SETIP   - SET PROXY IP", 13
         .byte "/PORT    - SET PORT", 13
         .byte "/MODEL   - SET AI MODEL", 13
+        .byte "/MORE    - TOGGLE PAGINATION", 13
         .byte "/SAVE    - SAVE CONFIG", 13
         .byte "/CLEAR   - CLEAR SCREEN", 13
         .byte "ESC      - MENU", 13, 0
@@ -4099,6 +4155,7 @@ output_row:     .res 1
 output_col:     .res 1          ; Column position on output line
 is_connected:   .res 1          ; 1=TCP connection open, 0=not connected
 lines_since_pause: .res 1       ; Lines output since last [MORE] pause
+more_enabled:   .res 1          ; 1=[MORE] pagination on (default), 0=off
 LINES_PER_PAGE  = 19            ; Lines before showing [MORE]
 
 ; Protocol state
