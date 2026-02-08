@@ -93,7 +93,13 @@ CONFIG_IP       = $0300         ; 4 bytes: proxy IP
 CONFIG_PORT     = $0304         ; 2 bytes: port (little-endian)
 CONFIG_MODEL    = $0306         ; 1 byte: AI model (0=sonnet, 1=opus, 2=haiku)
 CONFIG_MAGIC    = $0307         ; 1 byte: magic ($A2 = valid config)
+CONFIG_DISPLAY   = $0308         ; 1 byte: display mode (0=40U, 1=40L, 2=80)
 CONFIG_MAGIC_VAL = $A2
+
+; Display mode constants
+DISPLAY_40U      = 0             ; 40-col uppercase (Apple ][/][+)
+DISPLAY_40L      = 1             ; 40-col mixed case (//e with ALTCHARSET)
+DISPLAY_80       = 2             ; 80-col mixed case (//e with 80-col card)
 
 ; Model constants
 MODEL_SONNET    = 0
@@ -169,6 +175,11 @@ TXTPAGE1        = $C054         ; Display page 1
 TXTPAGE2        = $C055         ; Display page 2
 STORE80OFF      = $C000         ; 80-col store off
 STORE80ON       = $C001         ; 80-col store on
+CLR80VID        = $C00C         ; 40-col mode
+SET80VID        = $C00D         ; 80-col mode
+CLRALTCHAR      = $C00E         ; Uppercase charset
+SETALTCHAR      = $C00F         ; Alternate charset (lowercase)
+INIT80COL       = $C300         ; 80-col firmware entry
 RDTEXT          = $C01A         ; Read text/graphics flag
 RD80COL         = $C01F         ; Read 80-col card status
 
@@ -186,8 +197,8 @@ MLI_SET_EOF     = $D0           ; Set end of file
 ; ProDOS file types
 FT_BIN          = $06           ; Binary file
 
-; Config file size (8 bytes: IP + Port + Flags + Magic)
-CONFIG_SIZE     = 8
+; Config file size (9 bytes: IP + Port + Model + Magic + Display)
+CONFIG_SIZE     = 9
 
 ;-------------------------------------------------------------------------------
 ; Zero Page Variables (using safe locations not used by IP65)
@@ -218,17 +229,32 @@ start:
         jsr print
         jsr print_cr
 
-        ; Detect 80-column card
-        jsr detect_80col
-        sta col_mode
+        ; Load saved configuration FIRST (before display mode)
+        jsr load_config
 
-        ; Show column mode
-        lda col_mode
-        beq @show_40
-        ldax #msg_80col
-        jmp @show_mode
-@show_40:
+        ; Apply display mode from config
+        lda CONFIG_DISPLAY
+        cmp #3                  ; Validate (must be 0, 1, or 2)
+        bcc @display_ok
+        lda #DISPLAY_40U        ; Default if garbage
+        sta CONFIG_DISPLAY
+@display_ok:
+        sta display_mode
+        jsr apply_display_mode
+
+        ; Show display mode
+        lda display_mode
+        cmp #DISPLAY_80
+        beq @show_80
+        cmp #DISPLAY_40L
+        beq @show_40l
         ldax #msg_40col
+        jmp @show_mode
+@show_40l:
+        ldax #msg_40l
+        jmp @show_mode
+@show_80:
+        ldax #msg_80col
 @show_mode:
         jsr print
         jsr print_cr
@@ -248,9 +274,6 @@ start:
         jsr print_cr
         jsr print_ip_config
         jsr print_cr
-
-        ; Load saved configuration
-        jsr load_config
 
         ; Install ampersand hook
         jsr install_hook
@@ -302,6 +325,56 @@ detect_80col:
         rts
 @have_80col:
         lda #CAP_80_COL
+        rts
+
+;-------------------------------------------------------------------------------
+; Apply display mode (sets hardware, screen width, col_mode)
+; Input: display_mode must be set (0=40U, 1=40L, 2=80)
+;-------------------------------------------------------------------------------
+apply_display_mode:
+        lda display_mode
+        cmp #DISPLAY_80
+        beq @mode_80
+        cmp #DISPLAY_40L
+        beq @mode_40l
+        ; Default: 40U
+@mode_40u:
+        sta CLR80VID            ; 40-col
+        sta STORE80OFF
+        sta CLRALTCHAR          ; Uppercase only
+        ; Restore CSW to normal COUT1 (in case 80-col firmware changed it)
+        lda #<COUT1
+        sta $36                 ; CSWL
+        lda #>COUT1
+        sta $37                 ; CSWH
+        lda #39
+        sta screen_width_m1
+        lda #CAP_40_COL
+        sta col_mode
+        rts
+@mode_40l:
+        sta CLR80VID
+        sta STORE80OFF
+        sta SETALTCHAR          ; Enable lowercase
+        ; Restore CSW to normal COUT1
+        lda #<COUT1
+        sta $36                 ; CSWL
+        lda #>COUT1
+        sta $37                 ; CSWH
+        lda #39
+        sta screen_width_m1
+        lda #CAP_40_COL
+        sta col_mode
+        rts
+@mode_80:
+        ; Set 80-col via soft switches (don't call $C300 firmware - may not exist)
+        sta SET80VID            ; Enable 80-col display
+        sta STORE80ON           ; Enable 80-col memory mapping
+        sta SETALTCHAR          ; Enable lowercase
+        lda #79
+        sta screen_width_m1
+        lda #CAP_80_COL
+        sta col_mode
         rts
 
 ;-------------------------------------------------------------------------------
@@ -978,6 +1051,10 @@ load_config:
         lda #MODEL_SONNET
         sta CONFIG_MODEL
 
+        ; Default display: 40U (uppercase)
+        lda #DISPLAY_40U
+        sta CONFIG_DISPLAY
+
         ; Mark as valid
         lda #CONFIG_MAGIC_VAL
         sta CONFIG_MAGIC
@@ -1102,8 +1179,13 @@ main_ui:
         jsr print_cr
 
 @main_loop:
-        ; Ensure we're on a new line before prompt
-        jsr print_cr
+        ; Position cursor at input line (line 23) for prompt
+        lda #INPUT_LINE
+        sta CV
+        jsr VTAB
+        lda #0
+        sta CH
+        jsr CLREOL
 
         ; Print prompt
         ldax #prompt_str
@@ -1487,8 +1569,15 @@ handle_command:
 @check_m:
         ; /MODEL
         cmp #'M'
-        bne @check_r
+        bne @check_d
         jsr cmd_model
+        rts
+
+@check_d:
+        ; /DISPLAY
+        cmp #'D'
+        bne @check_r
+        jsr cmd_display
         rts
 
 @check_r:
@@ -1893,6 +1982,51 @@ cmd_prompt:
         rts
 
 ;-------------------------------------------------------------------------------
+; Command: /DISPLAY [40|40L|80] - Set display mode
+;-------------------------------------------------------------------------------
+cmd_display:
+        ; Check for argument at input_buffer+9 ("/DISPLAY " = 9 chars)
+        lda input_buffer+9
+        beq @show_options
+
+        cmp #'4'
+        beq @parse_40
+        cmp #'8'
+        beq @set_80
+        jmp @show_options
+
+@parse_40:
+        ; Check for 'L' after "40" -> 40L (lowercase), else 40U
+        lda input_buffer+11
+        jsr to_upper
+        cmp #'L'
+        beq @set_40l
+        ; Default: 40U (handles "40", "40U", etc.)
+@set_40u:
+        lda #DISPLAY_40U
+        jmp @apply
+@set_40l:
+        lda #DISPLAY_40L
+        jmp @apply
+@set_80:
+        lda #DISPLAY_80
+@apply:
+        sta CONFIG_DISPLAY
+        sta display_mode
+        jsr save_config_file
+        jsr apply_display_mode
+        jsr HOME
+        jsr draw_ui
+        ; Forward to proxy so it adjusts formatting
+        jsr send_chat
+        rts
+
+@show_options:
+        ldax #msg_display_usage
+        jsr print_status
+        rts
+
+;-------------------------------------------------------------------------------
 ; Command: /MODEL [S|O|H] - Set AI model
 ;-------------------------------------------------------------------------------
 cmd_model:
@@ -2149,14 +2283,14 @@ send_code_request:
 ; Build and send INIT packet
 ;-------------------------------------------------------------------------------
 send_init_packet:
-        ; Header: A2 + PKT_INIT + len(2) + seq
+        ; Header: A2 + PKT_INIT + len(3) + seq
         lda #A2P_MAGIC_0
         sta send_buffer
         lda #A2P_MAGIC_1
         sta send_buffer+1
         lda #PKT_INIT
         sta send_buffer+2
-        lda #2               ; Data length = 2 (capabilities + model)
+        lda #3               ; Data length = 3 (capabilities + model + display)
         sta send_buffer+3
         lda #0
         sta send_buffer+4
@@ -2172,6 +2306,10 @@ send_init_packet:
         lda CONFIG_MODEL
         sta send_buffer+7
 
+        ; Data byte 2: display mode
+        lda display_mode
+        sta send_buffer+8
+
         ; Checksum (XOR of type through data)
         lda send_buffer+2    ; Type
         eor send_buffer+3    ; Len lo
@@ -2179,10 +2317,11 @@ send_init_packet:
         eor send_buffer+5    ; Seq
         eor send_buffer+6    ; Capabilities
         eor send_buffer+7    ; Model
-        sta send_buffer+8
+        eor send_buffer+8    ; Display mode
+        sta send_buffer+9
 
-        ; Send (9 bytes)
-        lda #9
+        ; Send (10 bytes)
+        lda #10
         sta tcp_send_data_len
         lda #0
         sta tcp_send_data_len+1
@@ -2833,58 +2972,95 @@ handle_status_msg:
         sta recv_state
 @not_done:
 
-        ; Clear line 22 first
-        jsr status_msg
+        ; Display status on line 22 using COUT (works in --simple terminal mode)
+        ; Save cursor position
+        lda CV
+        sta status_save_cv
+        lda CH
+        sta status_save_ch
 
-        ; Write status message directly to screen memory at $750
+        ; Position at line 22, column 0
+        lda #STATUS_LINE
+        sta CV
+        jsr VTAB
+        lda #0
+        sta CH
+
+        ; Clear line
+        jsr CLREOL
+
+        ; Print status message via COUT
         ldy #0
 @print:
         cpy pkt_data_pos
-        bcs @done
-        cpy #39              ; Limit to 39 chars
-        bcs @done
+        bcs @restore
+        cpy screen_width_m1  ; Limit to screen width
+        bcs @restore
         lda pkt_buffer,y
         ora #$80             ; Set high bit for Apple II display
-        sta STATUS_LINE_ADDR,y  ; Direct screen write
+        jsr COUT
         iny
         bne @print
-@done:
+
+@restore:
+        ; Restore cursor position
+        lda status_save_cv
+        sta CV
+        jsr VTAB
+        lda status_save_ch
+        sta CH
         rts
 
 ;-------------------------------------------------------------------------------
 ; Handle ERR packet - writes to status line 22
 ;-------------------------------------------------------------------------------
 handle_error_msg:
-        ; Clear line 22
-        jsr status_msg
+        ; Save cursor
+        lda CV
+        sta status_save_cv
+        lda CH
+        sta status_save_ch
+        ; Position at line 22
+        lda #STATUS_LINE
+        sta CV
+        jsr VTAB
+        lda #0
+        sta CH
+        jsr CLREOL
 
-        ; Write "ERROR: " prefix directly
+        ; Print "ERROR: " prefix via COUT
         ldx #0
 @prefix:
         lda msg_error_prefix,x
-        beq @msg           ; Null terminator
+        beq @msg
         ora #$80
-        sta STATUS_LINE_ADDR,x
+        jsr COUT
         inx
-        cpx #7             ; "ERROR: " is 7 chars
+        cpx #7
         bcc @prefix
 
 @msg:
-        ; Write error message after prefix
+        ; Print error message via COUT
         ldy #0
 @print:
         cpy pkt_data_pos
         bcs @done
         txa
-        cmp #39            ; Total max 39 chars
+        cmp screen_width_m1
         bcs @done
         lda pkt_buffer,y
         ora #$80
-        sta STATUS_LINE_ADDR,x
+        jsr COUT
         inx
         iny
         bne @print
 @done:
+        ; Restore cursor
+        lda status_save_cv
+        sta CV
+        jsr VTAB
+        lda status_save_ch
+        sta CH
         rts
 
 ;-------------------------------------------------------------------------------
@@ -3040,7 +3216,7 @@ output_char:
 @check_wrap:
         ; Check line wrap
         lda CH
-        cmp #39              ; At end of line?
+        cmp screen_width_m1  ; At end of line?
         bcc @print
         jsr do_scroll
         lda #0
@@ -3283,18 +3459,30 @@ show_menu:
 STATUS_LINE_ADDR = $750
 
 status_msg:
-        ; Clear line 22 directly (40 spaces)
-        lda #$A0             ; Space with high bit
-        ldx #39
-@clear:
-        sta STATUS_LINE_ADDR,x
-        dex
-        bpl @clear
+        ; Clear line 22 using COUT (works in --simple terminal mode)
+        ; Save cursor
+        lda CV
+        sta status_save_cv
+        lda CH
+        sta status_save_ch
+        ; Position at line 22
+        lda #STATUS_LINE
+        sta CV
+        jsr VTAB
+        lda #0
+        sta CH
+        jsr CLREOL
+        ; Restore cursor
+        lda status_save_cv
+        sta CV
+        jsr VTAB
+        lda status_save_ch
+        sta CH
         rts
 
 ;-------------------------------------------------------------------------------
-; Status line routines - write directly to screen memory at line 22 ($750)
-; These routines never use COUT/print, avoiding cursor corruption
+; Status line routines - use COUT for terminal compatibility
+; Save/restore cursor position so output_char isn't corrupted
 ;-------------------------------------------------------------------------------
 
 ; Print string to status line (clears first, starts at column 0)
@@ -3302,22 +3490,39 @@ status_msg:
 print_status:
         sta status_ptr
         stx status_ptr+1
-        jsr status_msg       ; Clear line 22
+        ; Save cursor
+        lda CV
+        sta status_save_cv
+        lda CH
+        sta status_save_ch
+        ; Position at line 22
+        lda #STATUS_LINE
+        sta CV
+        jsr VTAB
         lda #0
-        sta status_pos       ; Start at column 0
+        sta CH
+        sta status_pos
+        jsr CLREOL
+        ; Print string via COUT
         ldy #0
 @loop:
         lda (status_ptr),y
         beq @done
         ldx status_pos
-        cpx #39
+        cpx screen_width_m1
         bcs @done
         ora #$80
-        sta STATUS_LINE_ADDR,x
+        jsr COUT
         inc status_pos
         iny
         bne @loop
 @done:
+        ; Restore cursor
+        lda status_save_cv
+        sta CV
+        jsr VTAB
+        lda status_save_ch
+        sta CH
         rts
 
 ; Append string to status line (continues from current position)
@@ -3325,31 +3530,69 @@ print_status:
 status_print:
         sta status_ptr
         stx status_ptr+1
+        ; Save cursor
+        lda CV
+        sta status_save_cv
+        lda CH
+        sta status_save_ch
+        ; Position at status line
+        lda #STATUS_LINE
+        sta CV
+        jsr VTAB
+        lda status_pos
+        sta CH
+        ; Print string via COUT
         ldy #0
 @loop:
         lda (status_ptr),y
         beq @done
         ldx status_pos
-        cpx #39
+        cpx screen_width_m1
         bcs @done
         ora #$80
-        sta STATUS_LINE_ADDR,x
+        jsr COUT
         inc status_pos
         iny
         bne @loop
 @done:
+        ; Restore cursor
+        lda status_save_cv
+        sta CV
+        jsr VTAB
+        lda status_save_ch
+        sta CH
         rts
 
 ; Append single character to status line
 ; Input: A = character (will have high bit set)
 status_char:
+        pha
+        ; Save cursor
+        lda CV
+        sta status_save_cv
+        lda CH
+        sta status_save_ch
+        ; Position at status line
+        lda #STATUS_LINE
+        sta CV
+        jsr VTAB
+        lda status_pos
+        sta CH
+        ; Print char
+        pla
         ldx status_pos
-        cpx #39
+        cpx screen_width_m1
         bcs @done
         ora #$80
-        sta STATUS_LINE_ADDR,x
+        jsr COUT
         inc status_pos
 @done:
+        ; Restore cursor
+        lda status_save_cv
+        sta CV
+        jsr VTAB
+        lda status_save_ch
+        sta CH
         rts
 
 ; Append decimal number to status line
@@ -3410,6 +3653,8 @@ status_decimal:
 
 dec_temp: .res 1
 status_pos: .res 1           ; Current column on status line
+status_save_cv: .res 1       ; Saved CV for status line routines
+status_save_ch: .res 1       ; Saved CH for status line routines
 
 ;-------------------------------------------------------------------------------
 ; Clear output area and reset cursor for new response
@@ -3609,10 +3854,16 @@ msg_banner:
         .byte "APPLE II AGENT V1.0", 0
 
 msg_40col:
-        .byte "40-COLUMN MODE", 0
+        .byte "40-COLUMN UPPERCASE", 0
+
+msg_40l:
+        .byte "40-COLUMN MIXED CASE", 0
 
 msg_80col:
-        .byte "80-COLUMN MODE", 0
+        .byte "80-COLUMN MIXED CASE", 0
+
+msg_display_usage:
+        .byte "/DISPLAY 40|40L|80", 0
 
 msg_init_net:
         .byte "INITIALIZING NETWORK...", 0
@@ -3753,6 +4004,7 @@ help_text:
         .byte "/EXIT    - DROP TO BASIC", 13
         .byte "/RESET   - NEW SESSION", 13
         .byte "/PROMPT  - SET AI CONTEXT", 13
+        .byte "/DISPLAY - 40/40L/80 MODE", 13
         .byte "/IP      - SHOW PROXY IP", 13
         .byte "/SETIP   - SET PROXY IP", 13
         .byte "/PORT    - SET PORT", 13
@@ -3841,6 +4093,8 @@ close_refnum:
 ; State
 in_ui:          .res 1
 col_mode:       .res 1          ; 0=40col, 1=80col
+screen_width_m1: .res 1         ; 39 or 79 (screen width minus 1)
+display_mode:    .res 1         ; 0=40U, 1=40L, 2=80
 output_row:     .res 1
 output_col:     .res 1          ; Column position on output line
 is_connected:   .res 1          ; 1=TCP connection open, 0=not connected

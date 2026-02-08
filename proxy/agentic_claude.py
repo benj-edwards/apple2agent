@@ -352,7 +352,8 @@ class AgenticClaude:
                  send_status: Callable[[str], None],
                  send_code: Callable[[str], None],
                  mcp_call: Optional[Callable[[str, dict], Any]] = None,
-                 send_binary: Optional[Callable[[str, int], None]] = None):
+                 send_binary: Optional[Callable[[str, int], None]] = None,
+                 send_stream: Optional[Callable[[str], None]] = None):
         """
         Args:
             send_to_apple2: Function to send response text to real Apple II
@@ -360,12 +361,14 @@ class AgenticClaude:
             send_code: Function to send BASIC code to real Apple II
             mcp_call: Function to call MCP tools (for emulator)
             send_binary: Function to send machine code to real Apple II
+            send_stream: Function to send scrolling output text to Apple II
         """
         self.send_to_apple2 = send_to_apple2
         self.send_status = send_status
         self.send_code = send_code
         self.mcp_call = mcp_call
         self.send_binary = send_binary
+        self.send_stream = send_stream
 
         self.client = None
         if HAS_ANTHROPIC:
@@ -387,6 +390,12 @@ class AgenticClaude:
         self._heartbeat_thread = None
         self._heartbeat_paused = False  # Pause during code deployment
 
+        # Phase tracking for detailed status display
+        self._current_turn = 0
+        self._max_turns = 50
+        self._phase = "THINKING"  # THINKING, CODING, TESTING, DEPLOYING, etc.
+        self._phase_start = 0.0
+
         # Context management - compact when approaching limit
         self.max_context_tokens = 150000  # Leave headroom for 200k context
         self.compact_threshold = 100000   # Start compacting at this level
@@ -394,8 +403,90 @@ class AgenticClaude:
         # Custom prompt - user can set additional context/instructions
         self.custom_prompt: Optional[str] = None
 
+        # Display mode properties (set by proxy from /DISPLAY or INIT packet)
+        self.display_width = 39       # 39 for 40-col, 79 for 80-col
+        self.display_uppercase = True  # True for 40U, False for 40L/80
+
         # Track last user message for checkpoint descriptions
         self._last_user_message: str = ""
+
+    def _stream(self, text: str):
+        """Send scrolling output text to Apple II (if send_stream is available).
+        This shows text in the main output area, scrolling like Claude Code.
+        Uses _send_lock to avoid interleaving with heartbeat status updates."""
+        if self.send_stream:
+            try:
+                with self._send_lock:
+                    self.send_stream(text)
+                    self._last_send_time = time.time()
+            except Exception:
+                pass
+
+    def _format_text(self, text: str) -> str:
+        """Apply display case formatting."""
+        return text.upper() if self.display_uppercase else text
+
+    def _word_wrap(self, text: str, width: int = None) -> list:
+        """Word-wrap text to fit Apple II display.
+        Returns a list of lines, each no longer than width chars."""
+        if width is None:
+            width = self.display_width
+        words = text.split()
+        if not words:
+            return []
+        lines = []
+        current = words[0]
+        for word in words[1:]:
+            if len(current) + 1 + len(word) <= width:
+                current += " " + word
+            else:
+                lines.append(current)
+                current = word
+                # If a single word exceeds width, truncate it
+                if len(current) > width:
+                    current = current[:width]
+        lines.append(current)
+        return lines
+
+    def _tool_param_hint(self, tool_name: str, tool_input: dict) -> str:
+        """Extract key parameter hint for a tool call (like Claude Code shows).
+        Returns a short string for 40-col display, or empty string."""
+        try:
+            if tool_name == "emulator_load_env":
+                return tool_input.get("env", "basic").upper()
+            elif tool_name == "emulator_type":
+                t = tool_input.get("text", "")[:20].upper()
+                return f'"{t}"' if t else ""
+            elif tool_name == "emulator_run_basic":
+                c = tool_input.get("command", "")[:20].upper()
+                return c
+            elif tool_name == "emulator_inject_basic":
+                src = tool_input.get("source", "")
+                lines = src.count('\n') + 1
+                return f"{lines} LINES"
+            elif tool_name == "emulator_peek":
+                addr = tool_input.get("address", 0)
+                return f"${addr:04X}" if isinstance(addr, int) else str(addr)
+            elif tool_name == "emulator_poke":
+                addr = tool_input.get("address", 0)
+                return f"${addr:04X}" if isinstance(addr, int) else str(addr)
+            elif tool_name == "emulator_call":
+                addr = tool_input.get("address", 0)
+                return f"${addr:04X}" if isinstance(addr, int) else str(addr)
+            elif tool_name == "emulator_assemble":
+                src = tool_input.get("source", "")
+                lines = src.count('\n') + 1
+                return f"{lines} LINES"
+            elif tool_name in ("apple2_send_code", "disk_save_basic"):
+                src = tool_input.get("source", tool_input.get("code", ""))
+                lines = src.count('\n') + 1 if src else 0
+                return f"{lines} LINES"
+            elif tool_name == "apple2_send_binary":
+                addr = tool_input.get("load_address", 0)
+                return f"${addr:04X}" if isinstance(addr, int) else str(addr)
+        except Exception:
+            pass
+        return ""
 
     def set_custom_prompt(self, prompt: Optional[str]) -> None:
         """Set a custom prompt that will be appended to the system prompt."""
@@ -581,7 +672,7 @@ class AgenticClaude:
         elif tool_name == "apple2_send_status":
             status = tool_input.get("status", "")
             self.send_status(status)
-            return "Status sent to Apple II"
+            return "OK"
 
         elif tool_name == "apple2_send_binary":
             self.send_status("DEPLOYING BINARY...")
@@ -946,7 +1037,7 @@ Be concise but preserve important technical details."""
             pass
 
     def _heartbeat_loop(self):
-        """Send periodic heartbeat dots when no other traffic is flowing."""
+        """Send periodic heartbeat to keep Apple II TCP alive and show progress."""
         while self._heartbeat_running:
             time.sleep(2)
             if not self._heartbeat_running:
@@ -958,12 +1049,30 @@ Be concise but preserve important technical details."""
             # Only send heartbeat if no other message was sent recently
             if time.time() - self._last_send_time > 1.5:
                 try:
-                    self.send_status(".")
+                    now = time.time()
+                    total = int(now - getattr(self, '_session_start', now))
+                    phase = self._phase
+                    turn = self._current_turn
+                    max_t = self._max_turns
+                    # Format: "THINKING.. (1M05S * T2/20)"
+                    mins = total // 60
+                    secs = total % 60
+                    if mins > 0:
+                        t_str = f"{mins}M{secs:02d}S"
+                    else:
+                        t_str = f"{secs}S"
+                    # Truncate phase to fit screen width
+                    screen_width = self.display_width + 1
+                    max_phase = screen_width - len(t_str) - len(f" * T{turn}/{max_t}") - 5
+                    if len(phase) > max_phase:
+                        phase = phase[:max_phase] + ".."
+                    msg = f"{phase} ({t_str} * T{turn}/{max_t})"
+                    self.send_status(msg)
                 except Exception:
                     pass  # Connection may be dead - let main loop handle it
 
     def run_agentic(self, user_message: str, model: str = "claude-sonnet-4-20250514",
-                    max_turns: int = 20) -> str:
+                    max_turns: int = 50) -> str:
         """
         Run the agentic loop.
 
@@ -1081,16 +1190,21 @@ CRITICAL RULES:
 2. COMPLEX PROGRAMS: Use emulator_load_env (instant), not emulator_boot (slow)
 3. When you read emulator screen, the user sees it too!
 4. After deploy: "TYPE /EXIT THEN RUN" (BASIC) or "TYPE /EXIT THEN CALL 24576" (ML)
-5. Keep messages UPPERCASE
+5. {case_rule}
 6. NEVER re-launch AGENT.BIN - you ARE the agent!
 
 You are the user's AI programming partner. Be FAST for simple stuff!"""
+
+        # Set case rule based on display mode
+        case_rule = "Keep messages UPPERCASE" if self.display_uppercase else "Use natural mixed case"
+        system_prompt = system_prompt.replace("{case_rule}", case_rule)
 
         # Append custom prompt if set
         if self.custom_prompt:
             system_prompt += f"\n\nUSER CONTEXT/INSTRUCTIONS:\n{self.custom_prompt}"
 
         self.send_status("THINKING...")
+        self._session_start = time.time()
 
         # Start continuous heartbeat to keep Apple II TCP alive
         self._start_heartbeat()
@@ -1102,10 +1216,15 @@ You are the user's AI programming partner. Be FAST for simple stuff!"""
 
     def _run_agentic_loop(self, model, system_prompt, max_turns):
         """Inner agentic loop (runs with heartbeat active)."""
+        self._max_turns = max_turns
         for turn in range(max_turns):
+            self._current_turn = turn + 1
+            self._phase = "THINKING"
+            self._phase_start = time.time()
+
             # Show turn progress
-            if turn > 0:
-                self.send_status(f"TURN {turn+1}/{max_turns}...")
+            self.send_status(f"T{turn+1}/{max_turns}: CALLING CLAUDE...")
+            self._stream(f"--- TURN {turn+1}/{max_turns} ---")
 
             # Check if we need to compact the conversation
             self._compact_conversation(model)
@@ -1124,6 +1243,22 @@ You are the user's AI programming partner. Be FAST for simple stuff!"""
                     extra_headers={"anthropic-beta": "web-search-2025-03-05"}
                 )
 
+                # API call complete - update phase
+                elapsed = int(time.time() - self._phase_start)
+                if response.stop_reason == "tool_use":
+                    self._phase = "USING TOOLS"
+                else:
+                    self._phase = "COMPOSING REPLY"
+                self._phase_start = time.time()
+                self.send_status(f"T{self._current_turn}: CLAUDE RESPONDED ({elapsed}S)")
+                # Also show in scroll area with token usage
+                usage = getattr(response, 'usage', None)
+                if usage:
+                    in_tok = getattr(usage, 'input_tokens', 0)
+                    out_tok = getattr(usage, 'output_tokens', 0)
+                    tok_str = f"{in_tok//1000}K IN {out_tok//1000}K OUT"
+                    self._stream(f"  THOUGHT {elapsed}S * {tok_str}")
+
                 # Process response
                 assistant_content = []
                 final_text = ""
@@ -1135,15 +1270,32 @@ You are the user's AI programming partner. Be FAST for simple stuff!"""
                             "type": "text",
                             "text": block.text
                         })
+                        # Show Claude's text in scrolling output
+                        # Word-wrap for display
+                        thinking_lines = []
+                        for line in block.text.strip().split('\n'):
+                            stripped = self._format_text(line.strip())
+                            if not stripped:
+                                continue
+                            thinking_lines.append(stripped)
+                            for wrapped in self._word_wrap(stripped):
+                                self._stream(wrapped)
+                        # Also update status line with first line
+                        snippet = self._format_text(thinking_lines[0][:35]) if thinking_lines else ""
+                        if snippet and response.stop_reason == "tool_use":
+                            self._phase = snippet
+                            self.send_status(f"T{self._current_turn}: {snippet}")
 
                     elif block.type == "server_tool_use":
                         # Server-side web search - handled automatically by API
                         self.send_status("SEARCHING WEB...")
+                        self._stream("> SEARCHING WEB...")
                         assistant_content.append(block)
 
                     elif block.type == "web_search_tool_result":
                         # Web search results - handled automatically by API
                         self.send_status("GOT SEARCH RESULTS")
+                        self._stream("  GOT SEARCH RESULTS")
                         assistant_content.append(block)
 
                     elif block.type == "tool_use":
@@ -1151,30 +1303,42 @@ You are the user's AI programming partner. Be FAST for simple stuff!"""
                         tool_input = block.input
                         tool_id = block.id
 
-                        # Update status with friendly name
+                        # Update phase and status with friendly name
+                        friendly_names = {
+                            "emulator_boot": "BOOTING EMULATOR",
+                            "emulator_load_env": "LOADING EMULATOR",
+                            "emulator_type": "TYPING IN EMULATOR",
+                            "emulator_read_screen": "READING SCREEN",
+                            "emulator_run_basic": "RUNNING BASIC",
+                            "emulator_inject_basic": "INJECTING PROGRAM",
+                            "emulator_capture_graphics": "CAPTURING GFX",
+                            "emulator_peek": "READING MEMORY",
+                            "emulator_poke": "WRITING MEMORY",
+                            "emulator_assemble": "ASSEMBLING 6502",
+                            "emulator_call": "EXECUTING CODE",
+                            "emulator_read_basic_program": "READING PROGRAM",
+                            "apple2_send_code": "DEPLOYING CODE",
+                            "apple2_send_binary": "DEPLOYING BINARY",
+                            "apple2_send_message": "SENDING TO APPLE",
+                            "apple2_send_status": "STATUS UPDATE",
+                            "disk_save_basic": "SAVING TO DISK",
+                            "disk_save_binary": "SAVING BINARY",
+                            "disk_save_text": "SAVING TEXT",
+                            "disk_list": "LISTING DISK",
+                        }
+                        friendly = friendly_names.get(tool_name, tool_name.upper())
+                        self._phase = friendly
+                        self._phase_start = time.time()
+                        turn = self._current_turn
                         # Skip showing status for apple2_send_status since it sends its own
                         if tool_name != "apple2_send_status":
-                            friendly_names = {
-                                "emulator_boot": "BOOTING (SLOW)",
-                                "emulator_load_env": "INSTANT LOAD",
-                                "emulator_type": "TYPING",
-                                "emulator_read_screen": "READING SCREEN",
-                                "emulator_run_basic": "RUNNING BASIC",
-                                "emulator_inject_basic": "LOADING PROGRAM",
-                                "emulator_capture_graphics": "CAPTURING GRAPHICS",
-                                "emulator_peek": "READING MEMORY",
-                                "emulator_poke": "WRITING MEMORY",
-                                "emulator_assemble": "ASSEMBLING",
-                                "emulator_call": "EXECUTING CODE",
-                                "apple2_send_code": "DEPLOYING CODE",
-                                "apple2_send_binary": "DEPLOYING BINARY",
-                                "apple2_send_message": "SENDING MESSAGE",
-                                "disk_save_basic": "SAVING TO DISK",
-                                "disk_save_binary": "SAVING BINARY",
-                                "disk_list": "LISTING DISK",
-                            }
-                            friendly = friendly_names.get(tool_name, tool_name.upper())
-                            self.send_status(f"{friendly}...")
+                            self.send_status(f"T{turn}: {friendly}...")
+                            # Show tool call with key params (like Claude Code)
+                            param_hint = self._tool_param_hint(tool_name, tool_input)
+                            if param_hint:
+                                self._stream(f"* {friendly} ({param_hint})")
+                            else:
+                                self._stream(f"* {friendly}")
 
                         assistant_content.append({
                             "type": "tool_use",
@@ -1185,6 +1349,12 @@ You are the user's AI programming partner. Be FAST for simple stuff!"""
 
                         # Execute tool
                         result = self._execute_tool(tool_name, tool_input)
+
+                        # Stream abbreviated result (skip noise like send_status OK)
+                        if result and tool_name != "apple2_send_status":
+                            result_preview = self._format_text(result.strip().split('\n')[0][:37])
+                            if result_preview and result_preview != "OK":
+                                self._stream(f"  {result_preview}")
 
                         # Add assistant message and tool result
                         self.conversation.append({
@@ -1210,8 +1380,9 @@ You are the user's AI programming partner. Be FAST for simple stuff!"""
                         "role": "assistant",
                         "content": assistant_content
                     })
+                    self._stream("--- COMPLETE ---")
                     self.send_status("DONE")
-                    return final_text.upper()
+                    return self._format_text(final_text)
 
                 # If stop reason is tool_use, continue loop
                 if response.stop_reason != "tool_use":

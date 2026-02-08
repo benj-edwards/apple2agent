@@ -227,7 +227,8 @@ class ClaudeClient:
                         chunk_callback: Callable[[str, bool], None],
                         status_callback: Optional[Callable[[str], None]] = None,
                         model: int = MODEL_SONNET,
-                        custom_prompt: Optional[str] = None) -> None:
+                        custom_prompt: Optional[str] = None,
+                        uppercase: bool = True) -> None:
         """
         Stream a chat response (not code generation).
 
@@ -265,7 +266,7 @@ class ClaudeClient:
             ) as stream:
                 buffer = ""
                 for text in stream.text_stream:
-                    buffer += text.upper()
+                    buffer += text.upper() if uppercase else text
                     # Send when we have enough or hit punctuation
                     if len(buffer) >= 40 or buffer.endswith(('.', '!', '?', '\n')):
                         chunk_callback(buffer, False)
@@ -389,10 +390,12 @@ class AppleIISession:
         self.agentic_mode = True  # DEFAULT ON - agentic software development
         self.mcp_call = mcp_call  # Function to call MCP tools (for emulator)
         self.proxy = proxy  # Reference to parent proxy for persistent state
-        self.max_turns = 20  # Max agentic turns
+        self.max_turns = 50  # Max agentic turns (change with /LIMIT)
         self.keep_history = True  # Keep conversation history between messages
         self.final_response_sent = False  # Track if FINAL response already sent
         self._send_lock = threading.Lock()  # Serialize socket writes
+        self.bytes_sent = 0  # Track bytes sent for status display
+        self.bytes_recd = 0  # Track bytes received
 
     def run(self):
         """Main session loop."""
@@ -455,6 +458,16 @@ class AppleIISession:
                 if self.model not in MODEL_IDS:
                     self.model = MODEL_SONNET  # Default if invalid
 
+            # Read display mode (byte 2) if present
+            if len(packet.data) > 2:
+                display_byte = packet.data[2]
+                mode_map = {0: '40', 1: '40L', 2: '80'}
+                mode_name = mode_map.get(display_byte, '40')
+                # Will be applied after agentic claude is created (below)
+                self._pending_display_mode = mode_name
+            else:
+                self._pending_display_mode = None
+
             model_name = MODEL_NAMES.get(self.model, "Sonnet")
             print(f"[Session] Capabilities: {self.capabilities:#x}, columns={self.columns}, model={model_name}")
 
@@ -483,7 +496,8 @@ class AppleIISession:
                     send_status=throttled_status,
                     send_code=self._send_basic_code,
                     mcp_call=self.mcp_call,
-                    send_binary=self._send_binary_code
+                    send_binary=self._send_binary_code,
+                    send_stream=self._send_stream_line
                 )
                 print(f"[Session] Agentic Claude created (persistent)")
             else:
@@ -492,6 +506,7 @@ class AppleIISession:
                 self.proxy.agentic_claude.send_status = throttled_status
                 self.proxy.agentic_claude.send_code = self._send_basic_code
                 self.proxy.agentic_claude.send_binary = self._send_binary_code
+                self.proxy.agentic_claude.send_stream = self._send_stream_line
                 # Check if there's existing conversation history
                 history_len = len(self.proxy.agentic_claude.conversation)
                 if history_len > 0:
@@ -500,13 +515,25 @@ class AppleIISession:
                 else:
                     print(f"[Session] Agentic Claude reconnected (no history)")
 
+            # Apply display mode from INIT packet (now that agentic instance exists)
+            if hasattr(self, '_pending_display_mode') and self._pending_display_mode:
+                self._apply_display_mode_silent(self._pending_display_mode)
+                self._pending_display_mode = None
+
     def _handle_chat(self, packet: Packet):
         """Handle CHAT packet - user message."""
         message = packet.data.decode('ascii', errors='replace').strip()
+        msg_len = len(packet.data)
         print(f"[Session] Chat: {message}")
 
         # Reset response tracking for new message
         self.final_response_sent = False
+
+        # Immediate feedback - user sees this the moment proxy gets their message
+        if not message.startswith('/'):
+            self.bytes_sent = 0
+            self.bytes_recd = msg_len
+            self._send_status(f"RECD {msg_len}B - PROCESSING...")
 
         # Check for special commands
         if message.startswith('/'):
@@ -534,12 +561,13 @@ class AppleIISession:
                 "/AGENT - TOGGLE AGENT MODE\n"
                 "/RESET - NEW SESSION\n"
                 "/PROMPT <TXT> - SET CONTEXT\n"
+                "/DISPLAY 40|40L|80 - SCREEN\n"
                 "/CLEAR - CLEAR HISTORY\n"
                 "/MODEL S|O|H - SET MODEL\n"
                 "/SUSPEND - DROP TO BASIC\n"
                 "/CODE <DESC> - MAKE BASIC\n"
                 "/CHAT <MSG> - JUST CHAT\n"
-                "/TURNS <N> - MAX TURNS\n"
+                "/LIMIT <N> - MAX TURNS\n"
                 "/UNDO - RESTORE PREV CODE\n"
                 "/VERSIONS - SHOW HISTORY\n"
                 "/IP - CONNECTION INFO"
@@ -548,7 +576,7 @@ class AppleIISession:
             self._handle_suspend()
         elif command == 'AGENT':
             self._toggle_agentic_mode()
-        elif command == 'TURNS':
+        elif command in ('TURNS', 'LIMIT'):
             if len(parts) > 1:
                 try:
                     n = int(parts[1])
@@ -558,9 +586,9 @@ class AppleIISession:
                     else:
                         self._send_response("TURNS MUST BE 1-100")
                 except ValueError:
-                    self._send_response("USAGE: /TURNS <NUMBER>")
+                    self._send_response("USAGE: /LIMIT <NUMBER>")
             else:
-                self._send_response(f"MAX TURNS: {self.max_turns}")
+                self._send_response(f"MAX TURNS: {self.max_turns}\nUSE /LIMIT <N> TO CHANGE")
         elif command == 'HISTORY':
             self.keep_history = not self.keep_history
             if self.keep_history:
@@ -624,6 +652,13 @@ class AppleIISession:
             else:
                 model_name = MODEL_NAMES.get(self.model, "SONNET")
                 self._send_response(f"MODEL: {model_name.upper()}\nUSE /MODEL S|O|H TO CHANGE")
+        elif command == 'DISPLAY':
+            if len(parts) > 1:
+                mode = parts[1].upper()
+                self._set_display_mode(mode)
+            else:
+                current = self._get_display_mode_name()
+                self._send_response(f"DISPLAY: {current}\nUSE /DISPLAY 40|40L|80")
         else:
             self._send_response(f"UNKNOWN: {command}\nTYPE /HELP")
 
@@ -723,8 +758,10 @@ class AppleIISession:
         def status(msg):
             self._send_status(msg)
 
+        uppercase = not (self.capabilities & CAP_LOWERCASE)
         self.claude.stream_response(message, send_chunk, status,
-                                    model=self.model, custom_prompt=self.custom_prompt)
+                                    model=self.model, custom_prompt=self.custom_prompt,
+                                    uppercase=uppercase)
 
     def _send(self, packet: bytes):
         """Send raw packet with throttling for Apple II."""
@@ -732,6 +769,7 @@ class AppleIISession:
         with self._send_lock:
             try:
                 self.sock.sendall(packet)
+                self.bytes_sent += len(packet)
                 print(f"[Session] -> sent {len(packet)} bytes: {packet[:20].hex()}...")
                 time.sleep(0.05)  # 50ms between sends - agent processes multi-packet callbacks
             except (BrokenPipeError, ConnectionResetError) as e:
@@ -746,6 +784,12 @@ class AppleIISession:
     def _send_error(self, message: str):
         """Send error message."""
         packet = self.proto.encode_error(message[:MAX_DATA_SIZE])
+        self._send(packet)
+
+    def _send_stream_line(self, text: str):
+        """Send a line of text to the scrolling output area (non-final RESP).
+        This scrolls in the main text area like Claude Code output."""
+        packet = self.proto.encode_response(text + "\n", is_final=False)
         self._send(packet)
 
     def _send_response(self, text: str):
@@ -793,7 +837,9 @@ class AppleIISession:
                 self._last_status_msg = ""
                 def throttled_status(msg):
                     now = time.time()
-                    if msg != self._last_status_msg and (now - self._last_status_time) >= 0.3:
+                    elapsed = now - self._last_status_time
+                    # Send if: different message (throttled to 0.3s), OR same message but 1.5s+ passed (heartbeat dots)
+                    if (msg != self._last_status_msg and elapsed >= 0.3) or elapsed >= 1.5:
                         self._send_status(msg)
                         self._last_status_time = now
                         self._last_status_msg = msg
@@ -803,7 +849,8 @@ class AppleIISession:
                     send_status=throttled_status,
                     send_code=self._send_basic_code,
                     mcp_call=self.mcp_call,
-                    send_binary=self._send_binary_code
+                    send_binary=self._send_binary_code,
+                    send_stream=self._send_stream_line
                 )
             welcome = (
                 "================================\n"
@@ -825,6 +872,67 @@ class AppleIISession:
             self._send_response("APPLE II AGENT OFF\nBACK TO NORMAL CHAT")
             self._send_status("CHAT MODE")
             print(f"[Session] Apple II Agent mode disabled")
+
+    def _set_display_mode(self, mode: str):
+        """Set display mode and update agentic Claude properties."""
+        agentic = self.proxy.agentic_claude if self.proxy else None
+        if mode in ('40', '40U'):
+            self.columns = 40
+            self.capabilities = CAP_40_COL
+            if agentic:
+                agentic.display_width = 39
+                agentic.display_uppercase = True
+            self._send_response("DISPLAY: 40 UPPERCASE")
+        elif mode == '40L':
+            self.columns = 40
+            self.capabilities = CAP_40_COL | CAP_LOWERCASE
+            if agentic:
+                agentic.display_width = 39
+                agentic.display_uppercase = False
+            self._send_response("DISPLAY: 40 MIXED CASE")
+        elif mode == '80':
+            self.columns = 80
+            self.capabilities = CAP_80_COL | CAP_LOWERCASE
+            if agentic:
+                agentic.display_width = 79
+                agentic.display_uppercase = False
+            self._send_response("DISPLAY: 80 MIXED CASE")
+        else:
+            self._send_response("USE: /DISPLAY 40|40L|80")
+
+    def _apply_display_mode_silent(self, mode: str):
+        """Apply display mode without sending response (used during INIT)."""
+        agentic = self.proxy.agentic_claude if self.proxy else None
+        if mode in ('40', '40U'):
+            self.columns = 40
+            self.capabilities = CAP_40_COL
+            if agentic:
+                agentic.display_width = 39
+                agentic.display_uppercase = True
+            print(f"[Session] Display: 40 uppercase")
+        elif mode == '40L':
+            self.columns = 40
+            self.capabilities = CAP_40_COL | CAP_LOWERCASE
+            if agentic:
+                agentic.display_width = 39
+                agentic.display_uppercase = False
+            print(f"[Session] Display: 40 mixed case")
+        elif mode == '80':
+            self.columns = 80
+            self.capabilities = CAP_80_COL | CAP_LOWERCASE
+            if agentic:
+                agentic.display_width = 79
+                agentic.display_uppercase = False
+            print(f"[Session] Display: 80 mixed case")
+
+    def _get_display_mode_name(self) -> str:
+        """Get current display mode name."""
+        if self.capabilities & CAP_80_COL:
+            return "80 MIXED CASE"
+        elif self.capabilities & CAP_LOWERCASE:
+            return "40 MIXED CASE"
+        else:
+            return "40 UPPERCASE"
 
     def _agentic_response(self, message: str):
         """Handle message in agentic mode."""
@@ -854,7 +962,8 @@ class AppleIISession:
             )
             # Send final response to Apple II (unless already sent via tool/code)
             if not self.final_response_sent and response:
-                self._send_response(response)
+                # Prepend newline so response starts on fresh line after any prior output
+                self._send_response("\n" + response)
         except Exception as e:
             self._send_error(f"AGENT ERROR: {str(e)[:50]}")
 
