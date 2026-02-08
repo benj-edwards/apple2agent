@@ -996,6 +996,14 @@ async def list_tools() -> list[Tool]:
                 "properties": {}
             }
         ),
+        Tool(
+            name="load_dos33_env",
+            description="Instantly load a pre-baked DOS 3.3 BASIC environment. Much faster than boot with disk.",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
+        ),
 
         # Proxy Control
         Tool(
@@ -2061,6 +2069,9 @@ RESULT_BTN = $0304
         basic_state = states_dir / "basic.state"
         if not basic_state.exists():
             return f"BASIC environment snapshot not found at {basic_state}. Run tools/create_snapshots.py first."
+        # Auto-boot if not running
+        if not emu.is_running:
+            emu.boot(machine="enhanced", timeout=30.0)
         result = emu.load_state(str(basic_state))
         if result.get("ok"):
             return "BASIC environment loaded. Ready at ] prompt."
@@ -2073,11 +2084,29 @@ RESULT_BTN = $0304
         prodos_state = states_dir / "prodos.state"
         if not prodos_state.exists():
             return f"ProDOS environment snapshot not found at {prodos_state}. Run tools/create_snapshots.py first."
+        # Auto-boot if not running
+        if not emu.is_running:
+            emu.boot(machine="enhanced", timeout=30.0)
         result = emu.load_state(str(prodos_state))
         if result.get("ok"):
             return "ProDOS BASIC environment loaded. Ready at ] prompt."
         else:
             return f"Failed to load ProDOS environment: {result.get('error', 'unknown error')}"
+
+    elif name == "load_dos33_env":
+        # Load pre-baked DOS 3.3 BASIC environment
+        states_dir = Path(__file__).parent.parent.parent / "states"
+        dos33_state = states_dir / "dos33.state"
+        if not dos33_state.exists():
+            return f"DOS 3.3 environment snapshot not found at {dos33_state}. Run tools/create_snapshots.py first."
+        # Auto-boot if not running
+        if not emu.is_running:
+            emu.boot(machine="enhanced", timeout=30.0)
+        result = emu.load_state(str(dos33_state))
+        if result.get("ok"):
+            return "DOS 3.3 BASIC environment loaded. Ready at ] prompt."
+        else:
+            return f"Failed to load DOS 3.3 environment: {result.get('error', 'unknown error')}"
 
     # --- Proxy Control ---
     elif name == "proxy_start":

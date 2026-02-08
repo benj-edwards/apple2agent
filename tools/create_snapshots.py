@@ -38,15 +38,14 @@ SNAPSHOTS = [
         "disk": None,
         "output": STATES_DIR / "basic.state",
     },
-    # ProDOS snapshot disabled - ProDOS_2_4.dsk boots to BITSY.BOOT selector
-    # To enable: create a ProDOS disk that boots directly to BASIC.SYSTEM
-    # {
-    #     "name": "prodos",
-    #     "description": "ProDOS 2.4 with BASIC.SYSTEM",
-    #     "machine": "enhanced",
-    #     "disk": str(DISKS_DIR / "ProDOS_2_4.dsk"),
-    #     "output": STATES_DIR / "prodos.state",
-    # },
+    # ProDOS and DOS 3.3 snapshots are created manually because they require
+    # interactive menu navigation (ProDOS BITSY.BOOT selector) or a DOS 3.3
+    # boot disk. Use the MCP tools to create them:
+    #
+    #   ProDOS:  boot with ProDOS_2_4.dsk, select BASIC.SYSTEM, save_state
+    #   DOS 3.3: boot with any DOS 3.3 disk, save_state
+    #
+    # Or use the pre-created states in states/ directory.
 ]
 
 

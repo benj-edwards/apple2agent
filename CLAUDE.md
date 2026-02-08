@@ -284,30 +284,41 @@ Save and restore complete emulator state (CPU, 128KB RAM, soft switches).
 |------|-------------|
 | `save_state` | Save emulator state to a file |
 | `load_state` | Load emulator state from a file |
-| `load_basic_env` | Instantly load BASIC environment (no boot wait) |
-| `load_prodos_env` | Instantly load ProDOS environment (no boot wait) |
+| `load_basic_env` | Instantly load bare BASIC environment (no DOS) |
+| `load_prodos_env` | Instantly load ProDOS BASIC environment |
+| `load_dos33_env` | Instantly load DOS 3.3 BASIC environment |
 
-### Creating Snapshots
+All three `load_*_env` tools **auto-boot the emulator** if it's not already running. One call = instant ready.
 
-```bash
-# Generate pre-baked environment snapshots
-python3 tools/create_snapshots.py
-```
+### Pre-baked State Files
 
-This creates:
-- `states/basic.state` - Apple //e at ] prompt (no disk) ✅ **WORKING**
-- `states/prodos.state` - ProDOS with BASIC.SYSTEM (pending - needs direct-boot disk)
+- `states/basic.state` - Apple //e at ] prompt (no disk, no DOS)
+- `states/prodos.state` - ProDOS 2.4 with BASIC.SYSTEM at ] prompt
+- `states/dos33.state` - DOS 3.3 at ] prompt (with CATALOG/SAVE/LOAD)
 
 ### Using Instant Environments
 
 ```python
-# Option 1: Use MCP tools
-mcp__apple2-mcp__load_basic_env()  # Instant BASIC ready
-mcp__apple2-mcp__load_prodos_env()  # Instant ProDOS ready
+# One call does everything - boots emulator if needed, loads state instantly
+mcp__apple2-mcp__load_basic_env()    # Bare BASIC (no disk commands)
+mcp__apple2-mcp__load_prodos_env()   # ProDOS BASIC (PREFIX, CAT, etc.)
+mcp__apple2-mcp__load_dos33_env()    # DOS 3.3 BASIC (CATALOG, SAVE, LOAD, etc.)
 
-# Option 2: Use control socket directly
+# Or use control socket directly (emulator must be running)
 sock.load_state('states/basic.state')
 ```
+
+### Recreating Snapshots
+
+The bare BASIC state can be auto-generated:
+```bash
+python3 tools/create_snapshots.py
+```
+
+ProDOS and DOS 3.3 states require interactive boot (menu navigation). Create manually:
+1. Boot with the appropriate disk via MCP
+2. Navigate to BASIC prompt
+3. `save_state` to `states/prodos.state` or `states/dos33.state`
 
 ### State File Format
 
@@ -449,7 +460,7 @@ Working:
 - Code tokenization and memory injection ✅
 - Control socket integration ✅
 - **State save/load** - 128KB (main + aux) snapshots ✅
-- **Instant environments** - load_basic_env works, load_prodos_env pending ✅
+- **Instant environments** - load_basic_env, load_prodos_env, load_dos33_env all working (auto-boot) ✅
 - **Multi-client socket** - up to 16 simultaneous connections ✅
 - **Disk tools** - `prodos.py` list/add/del and `make_agent_disk.py` work correctly ✅
 - **Proxy control via MCP** - `proxy_start`, `proxy_stop`, `proxy_status`, `proxy_log` tools ✅
@@ -486,7 +497,7 @@ Known issues:
 8. **/CODE command WORKS** - use it while agentic mode injection is broken
 9. **Control socket has EVERYTHING** - peek, poke, step, breakpoints, graphics capture, state save/load
 10. **MULTI-CLIENT SOCKET** - up to 16 agents can connect simultaneously for parallel work
-11. **INSTANT BASIC** - use `load_basic_env` or load `states/basic.state` to skip boot
+11. **INSTANT ENVIRONMENTS** - `load_basic_env`, `load_prodos_env`, `load_dos33_env` auto-boot + load state in one call
 12. **DISK TOOLS WORK** - `python3 tools/prodos.py list/add/del` and `make_agent_disk.py` are fully functional
 13. **PROXY VIA MCP** - use `proxy_start`/`proxy_stop`/`proxy_status`/`proxy_log` MCP tools instead of shell commands
 14. **SET AGENT IP** - use `/SETIP x.x.x.x` on Apple II to configure proxy IP (default 192.168.64.1 rarely works)
