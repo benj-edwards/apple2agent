@@ -51,7 +51,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from basic_tokenizer_streaming import tokenize_program
 
 
-SOCKET_PATH = "/tmp/bobbin.sock"
+SOCKET_PATH = "/tmp/bobbin_bridge.sock"  # Separate from main emulator at /tmp/bobbin.sock
 BOBBIN_PATH = os.path.join(os.path.dirname(__file__), '..', 'bobbin', 'src', 'bobbin')
 
 
