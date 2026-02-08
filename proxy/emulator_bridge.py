@@ -137,6 +137,31 @@ class EmulatorBridge:
         self.emulator_running = True
         return {"ok": True, "machine": machine}
 
+    def _load_env(self, tool_name: str) -> dict:
+        """Boot emulator if needed and load a pre-baked environment state."""
+        states_dir = os.path.join(os.path.dirname(__file__), '..', 'states')
+        state_map = {
+            "mcp__apple2-mcp__load_basic_env": "basic.state",
+            "mcp__apple2-mcp__load_prodos_env": "prodos.state",
+            "mcp__apple2-mcp__load_dos33_env": "dos33.state",
+        }
+        state_file = os.path.join(states_dir, state_map[tool_name])
+        if not os.path.exists(state_file):
+            return {"error": f"State file not found: {state_file}"}
+
+        # Boot emulator if not running
+        if not self.emulator_running:
+            result = self.boot(machine="enhanced")
+            if "error" in result:
+                return result
+
+        # Load the state
+        result = self.sock.load_state(state_file)
+        if result.get("ok"):
+            env_name = state_map[tool_name].replace('.state', '').upper()
+            return {"ok": True, "env": env_name}
+        return result
+
     def shutdown(self):
         """Stop the emulator."""
         if self.sock:
@@ -183,6 +208,12 @@ class EmulatorBridge:
                 uthernet2=params.get("uthernet2", False),
                 mouse=params.get("mouse", False)
             )
+
+        # Instant environment loaders - boot + load state in one call
+        if tool_name in ("mcp__apple2-mcp__load_basic_env",
+                         "mcp__apple2-mcp__load_prodos_env",
+                         "mcp__apple2-mcp__load_dos33_env"):
+            return self._load_env(tool_name)
 
         # All other tools require connection
         if not self._ensure_connected():

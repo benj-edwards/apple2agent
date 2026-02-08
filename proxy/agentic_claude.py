@@ -43,10 +43,16 @@ APPLE2_TOOLS = [
     },
     {
         "name": "emulator_load_env",
-        "description": "INSTANT: Load pre-saved BASIC environment. Much faster than boot! Use this for testing.",
+        "description": "INSTANT: Load a pre-saved environment. Much faster than boot! Use 'basic' for bare BASIC, 'prodos' for ProDOS (disk commands), 'dos33' for DOS 3.3 (CATALOG/SAVE/LOAD).",
         "input_schema": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "env": {
+                    "type": "string",
+                    "enum": ["basic", "prodos", "dos33"],
+                    "description": "Environment: basic (bare BASIC), prodos (ProDOS BASIC), dos33 (DOS 3.3 BASIC). Default: basic"
+                }
+            },
             "required": []
         }
     },
@@ -457,11 +463,18 @@ class AgenticClaude:
             try:
                 # Handle instant environment loading
                 if tool_name == "emulator_load_env":
-                    self.send_status("LOADING EMULATOR...")
+                    env = tool_input.get("env", "basic")
+                    env_tool_map = {
+                        "basic": "mcp__apple2-mcp__load_basic_env",
+                        "prodos": "mcp__apple2-mcp__load_prodos_env",
+                        "dos33": "mcp__apple2-mcp__load_dos33_env",
+                    }
+                    mcp_tool = env_tool_map.get(env, "mcp__apple2-mcp__load_basic_env")
+                    self.send_status(f"LOADING {env.upper()}...")
+                    result = self.mcp_call(mcp_tool, {})
                     self.emulator_running = True
-                    result = self.mcp_call("mcp__apple2-mcp__load_basic_env", {})
                     self.send_status("EMULATOR READY")
-                    return "Emulator ready (instant load)"
+                    return f"Emulator ready ({env} environment loaded instantly)"
 
                 # Special handling for some tools
                 elif tool_name == "emulator_inject_basic":
@@ -985,6 +998,9 @@ Simple programs don't need testing - just send them!
 
 FOR COMPLEX PROGRAMS (graphics, games, multi-screen, tricky logic, assembly):
 1. Use emulator_load_env (instant!) - NOT emulator_boot (slow!)
+   - emulator_load_env env="basic" - bare BASIC (default, good for most programs)
+   - emulator_load_env env="prodos" - ProDOS BASIC (for disk operations like PREFIX, CAT)
+   - emulator_load_env env="dos33" - DOS 3.3 BASIC (for CATALOG, SAVE, LOAD)
 2. Inject and test the code
 3. Read screen to verify output - USER SEES THIS OUTPUT!
 4. Fix bugs if needed
@@ -1013,7 +1029,10 @@ ASSEMBLY/MACHINE LANGUAGE TOOLS:
 
 EMULATOR TOOLS (only for complex programs!):
 - emulator_load_env: INSTANT emulator ready (use this, not boot!)
-- emulator_boot: SLOW cold boot (avoid unless needed)
+  - env="basic": bare BASIC, no DOS (default)
+  - env="prodos": ProDOS BASIC with disk commands
+  - env="dos33": DOS 3.3 BASIC with CATALOG/SAVE/LOAD
+- emulator_boot: SLOW cold boot (avoid unless you need a specific disk)
 - emulator_read_screen: Check text output - SHOWS OUTPUT TO USER!
 - emulator_capture_graphics: See graphics (gr/hgr)
 
