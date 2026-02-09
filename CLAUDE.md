@@ -485,6 +485,21 @@ Known issues:
 - **Web search** - Anthropic native web search tool for looking up Apple II info
 - **Disk save tools** - `disk_save_basic`, `disk_save_binary`, `disk_save_text` in agentic mode
 
+## Avoiding Token Waste
+
+Every token through the API costs money and latency. These patterns avoid passing large data through the conversation:
+
+| Bad (wastes tokens) | Good (efficient) |
+|---------------------|-----------------|
+| `tokenize()` then `inject_tokenized_basic(hex_data=...)` | `inject_tokenized_basic(source="10 ...")` |
+| `assemble()` then `load_binary(hex_data=...)` | `assemble(source="...")` — auto-loads |
+| `load_binary(hex_data="A9 00 8D...")` for data files | `load_file(path="/path/to/file.bin", address=0x6000)` |
+
+- **`inject_tokenized_basic`**: Always use `source=` parameter. It tokenizes server-side. Never pass `hex_data`.
+- **`assemble`**: Auto-loads binary into emulator memory. Never call `load_binary` after.
+- **`load_file`**: Loads a local file directly into emulator memory. Use for sprites, fonts, lookup tables, pre-built binaries — anything larger than a few bytes. Never stream hex through `load_binary` for data files.
+- **Write data to files first**: If you generate binary data (sprite tables, character sets, level maps), write it to a file with the Write tool, then `load_file` it. The file contents never touch the API.
+
 ## NEVER FORGET
 
 1. **USE THE CONTROL SOCKET** - `BobbinControlSocket` is the reliable way to control the emulator
@@ -501,3 +516,4 @@ Known issues:
 12. **DISK TOOLS WORK** - `python3 tools/prodos.py list/add/del` and `make_agent_disk.py` are fully functional
 13. **PROXY VIA MCP** - use `proxy_start`/`proxy_stop`/`proxy_status`/`proxy_log` MCP tools instead of shell commands
 14. **SET AGENT IP** - use `/SETIP x.x.x.x` on Apple II to configure proxy IP (default 192.168.64.1 rarely works)
+15. **DON'T WASTE TOKENS** - use `source=` not `hex_data=`, use `load_file` not `load_binary` for data files, never stream hex through the API
