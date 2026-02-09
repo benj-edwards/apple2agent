@@ -326,6 +326,54 @@ DOS 3.3 is simpler but a different OS. Use `create_disk()` + `save_basic_to_disk
 - **HGR color is weird.** The Apple II generates color from bit patterns and position. Adjacent pixels affect each other's color. Use `HCOLOR=` to set (0=black1, 1=green, 2=violet, 3=white1, 4=black2, 5=orange, 6=blue, 7=white2).
 - **Lo-res colors**: 0=black, 1=magenta, 2=dark blue, 3=purple, 4=dark green, 5=grey1, 6=medium blue, 7=light blue, 8=brown, 9=orange, 10=grey2, 11=pink, 12=green, 13=yellow, 14=aqua, 15=white.
 
+### HGR Row Address Calculation
+
+HGR memory is NOT linear. Rows are interleaved across three 2KB groups. For row Y (0-191):
+
+```
+addr = $2000 + (Y & 7) * $0400 + ((Y>>3) & 7) * $0080 + (Y>>6) * $0028
+```
+
+- **Y & 7** (sub-row 0-7): selects which 1KB block ($0400 apart)
+- **(Y>>3) & 7** (row-in-group 0-7): offset by $0080 each
+- **Y >> 6** (group 0-2): offset by $0028 (40 decimal) each
+
+For a fixed range of rows, **use lookup tables** — faster and avoids gnarly 6502 math.
+
+### Double Hi-Res (DHGR) — //e Only
+
+560x192 mono or 140x192 with 16 colors. Uses BOTH main and auxiliary RAM at $2000-$3FFF. Each scan line is 80 bytes: 40 from AUX interleaved with 40 from MAIN.
+
+**Pixel layout per line:** `AUX[0] MAIN[0] AUX[1] MAIN[1] ... AUX[39] MAIN[39]`
+
+Each byte holds 7 pixels (bit 7 unused). 80 bytes x 7 = 560 pixels/line.
+
+**Soft switches to enable DHGR** (order matters — set 80STORE/80COL first):
+
+| Switch | Address | Purpose |
+|--------|---------|---------|
+| 80STORE on | $C001 | PAGE2 routes $2000-$3FFF to AUX |
+| 80COL on | $C00D | Enable 80-column hardware |
+| TXTCLR | $C050 | Graphics mode |
+| MIXCLR | $C052 | Full screen (no text window) |
+| HIRES | $C057 | Hi-res mode |
+| AN3OFF | $C05E | Enable double hi-res |
+
+**Writing AUX vs MAIN** (with 80STORE enabled):
+- `bit $C055` (PAGE2 on) → writes to $2000-$3FFF go to **AUX** RAM
+- `bit $C054` (PAGE2 off) → writes to $2000-$3FFF go to **MAIN** RAM
+
+You must write to both banks to fill the screen.
+
+**DHGR Gotchas:**
+- HGR memory is interleaved, not linear — use the row address formula or lookup tables
+- Must write BOTH AUX and MAIN or half the pixels are black
+- $7F = all 7 pixels on (white), $00 = all off
+- 80STORE MUST be on for PAGE2 ($C054/$C055) to bank $2000-$3FFF. Without it, PAGE2 selects display page instead.
+- `bit` works for all //e soft switches — they trigger on any access
+
+**To exit DHGR back to text:** `bit $C05F` (AN3ON), `bit $C056` (LORES), `bit $C051` (TXTSET), `bit $C000` (80STORE off), `bit $C00C` (80COL off)
+
 ### Common Mistakes
 
 1. **Forgetting `read_screen` or `capture_*` after running code.** You can't see what happened unless you capture the screen.
