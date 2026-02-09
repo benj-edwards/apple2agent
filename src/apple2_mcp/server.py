@@ -607,13 +607,17 @@ async def list_tools() -> list[Tool]:
         # Injection
         Tool(
             name="inject_tokenized_basic",
-            description="Inject pre-tokenized BASIC into memory and update pointers.",
+            description="Inject a BASIC program into memory and update pointers. Provide EITHER source (preferred, auto-tokenizes) OR hex_data (pre-tokenized). Using source avoids hex tokens in the conversation.",
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "source": {
+                        "type": "string",
+                        "description": "BASIC source code with line numbers (preferred - auto-tokenizes server-side)"
+                    },
                     "hex_data": {
                         "type": "string",
-                        "description": "Tokenized BASIC as hex string"
+                        "description": "Pre-tokenized BASIC as hex string (use source instead to save tokens)"
                     },
                     "load_address": {
                         "type": "integer",
@@ -625,8 +629,7 @@ async def list_tools() -> list[Tool]:
                         "default": False,
                         "description": "Automatically RUN after injection"
                     }
-                },
-                "required": ["hex_data"]
+                }
             }
         ),
 
@@ -851,7 +854,7 @@ async def list_tools() -> list[Tool]:
         # Assembly Language Tools
         Tool(
             name="assemble",
-            description="Assemble 6502 source code and return binary. Use load_binary to inject the result into memory, then call to execute it.",
+            description="Assemble 6502 source code and load binary into emulator memory. Returns size and load address. Use call() to execute it.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1557,12 +1560,18 @@ async def _call_tool_impl(name: str, args: dict[str, Any]) -> str:
 
     # --- Injection ---
     elif name == "inject_tokenized_basic":
-        hex_data = args["hex_data"]
         load_addr = args.get("load_address", 0x0801)
         auto_run = args.get("auto_run", False)
 
-        # Parse hex string
-        data = bytes.fromhex(hex_data.replace(' ', ''))
+        # Accept source (preferred) or hex_data
+        if "source" in args and args["source"]:
+            source = args["source"]
+            data = bytes(tokenize_basic(source))
+        elif "hex_data" in args and args["hex_data"]:
+            hex_data = args["hex_data"]
+            data = bytes.fromhex(hex_data.replace(' ', ''))
+        else:
+            return "ERROR: Provide either 'source' (BASIC code) or 'hex_data' (pre-tokenized hex)"
 
         # Calculate end address
         end_addr = load_addr + len(data)
@@ -1854,14 +1863,12 @@ async def _call_tool_impl(name: str, args: dict[str, Any]) -> str:
         result = assemble(source, load_address)
 
         if result["success"]:
+            # Auto-load into emulator memory (avoids hex going through Claude tokens)
+            hex_data = result["hex_data"].replace(' ', '')
+            emu.load(load_address, hex_data)
             return (
-                f"Assembly successful!\n"
-                f"Size: {result['size']} bytes\n"
-                f"Load address: ${result['load_address']:04X}\n"
-                f"Hex: {result['hex_data']}\n\n"
-                f"To run this code:\n"
-                f"1. load_binary(address={result['load_address']}, hex_data=\"{result['hex_data']}\")\n"
-                f"2. call(address={result['load_address']})"
+                f"Assembly successful! Loaded {result['size']} bytes at ${load_address:04X}\n"
+                f"Use call(address={load_address}) to execute."
             )
         else:
             return (

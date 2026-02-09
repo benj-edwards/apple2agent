@@ -243,20 +243,23 @@ APPLE2_TOOLS = [
     },
     {
         "name": "apple2_send_binary",
-        "description": "Send assembled machine code to the REAL Apple II. Specify load address.",
+        "description": "Send assembled machine code to the REAL Apple II. Use use_last=true to deploy the last assembled binary (avoids passing hex). Or provide hex_data directly.",
         "input_schema": {
             "type": "object",
             "properties": {
+                "use_last": {
+                    "type": "boolean",
+                    "description": "Deploy the last assembled binary (from emulator_assemble). Preferred - avoids hex tokens."
+                },
                 "hex_data": {
                     "type": "string",
-                    "description": "Assembled binary as hex string"
+                    "description": "Assembled binary as hex string (only if use_last is not available)"
                 },
                 "load_address": {
                     "type": "integer",
                     "description": "Address to load code (default: $6000)"
                 }
-            },
-            "required": ["hex_data"]
+            }
         }
     },
     {
@@ -700,8 +703,15 @@ class AgenticClaude:
 
         elif tool_name == "apple2_send_binary":
             self.send_status("DEPLOYING BINARY...")
-            hex_data = tool_input.get("hex_data", "")
-            load_addr = tool_input.get("load_address", 0x6000)
+            use_last = tool_input.get("use_last", False)
+            if use_last and hasattr(self, 'last_binary') and self.last_binary:
+                hex_data = self.last_binary
+                load_addr = getattr(self, 'last_binary_addr', 0x6000)
+            else:
+                hex_data = tool_input.get("hex_data", "")
+                load_addr = tool_input.get("load_address", 0x6000)
+            if not hex_data:
+                return "ERROR: No binary data (use emulator_assemble first, or provide hex_data)"
             if self.send_binary:
                 self.send_binary(hex_data, load_addr)
                 self.send_status(f"BINARY AT ${load_addr:04X}")
