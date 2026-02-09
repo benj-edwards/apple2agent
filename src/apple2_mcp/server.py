@@ -195,7 +195,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="load_binary",
-            description="Load binary data into memory from hex string.",
+            description="Load binary data into memory from hex string. Prefer load_file instead to avoid wasting tokens on hex strings.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -209,6 +209,24 @@ async def list_tools() -> list[Tool]:
                     }
                 },
                 "required": ["address", "hex_data"]
+            }
+        ),
+        Tool(
+            name="load_file",
+            description="Load a binary file from the local filesystem directly into emulator memory. Much more token-efficient than load_binary — the file contents never pass through the conversation. Use this for sprite data, font tables, pre-built binaries, etc.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the binary file on the local filesystem"
+                    },
+                    "address": {
+                        "type": "integer",
+                        "description": "Address to load the file into emulator memory"
+                    }
+                },
+                "required": ["path", "address"]
             }
         ),
 
@@ -1157,6 +1175,20 @@ async def _call_tool_impl(name: str, args: dict[str, Any]) -> str:
         data = bytes.fromhex(hex_data.replace(' ', ''))
         emu.poke(address, list(data))
         return f"Loaded {len(data)} bytes at ${address:04X}"
+
+    elif name == "load_file":
+        filepath = args["path"]
+        address = args["address"]
+        p = Path(filepath)
+        if not p.exists():
+            return f"ERROR: File not found: {filepath}"
+        data = p.read_bytes()
+        if len(data) == 0:
+            return f"ERROR: File is empty: {filepath}"
+        if address + len(data) > 0x10000:
+            return f"ERROR: File too large ({len(data)} bytes) for address ${address:04X} — would exceed 64KB"
+        emu.poke(address, list(data))
+        return f"Loaded {len(data)} bytes from {p.name} at ${address:04X} (${address:04X}-${address + len(data) - 1:04X})"
 
     # --- Screen ---
     elif name == "read_screen":

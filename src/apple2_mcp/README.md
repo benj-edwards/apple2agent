@@ -52,10 +52,13 @@ These patterns avoid passing large hex strings through the conversation:
 |---------------|---------|
 | `tokenize()` then `inject_tokenized_basic(hex_data=...)` | `inject_tokenized_basic(source="10 ...")` |
 | `assemble()` then `load_binary(hex_data=...)` | `assemble(source="...")` — auto-loads |
+| `load_binary(hex_data="A9 00 8D...")` for data files | `load_file(path="/path/to/file.bin", address=0x6000)` |
 
 NEVER call `tokenize` and then pass the hex result to `inject_tokenized_basic`. Just pass source directly.
 
 NEVER call `assemble` and then pass hex to `load_binary`. `assemble` already loads into memory.
+
+NEVER pass large hex strings via `load_binary`. Write data to a file, then use `load_file` to load it directly into memory. This applies to sprite data, font tables, lookup tables, pre-built binaries, etc.
 
 ## Tool Reference
 
@@ -75,7 +78,8 @@ NEVER call `assemble` and then pass hex to `load_binary`. `assemble` already loa
 |------|-------------|
 | `peek` | Read bytes (format: hex/decimal/ascii) |
 | `poke` | Write bytes |
-| `load_binary` | Load hex string into memory |
+| `load_binary` | Load hex string into memory (prefer `load_file` instead) |
+| `load_file` | Load a local file directly into memory (no hex tokens — use this for data files) |
 
 ### BASIC Programming
 
@@ -331,7 +335,7 @@ DOS 3.3 is simpler but a different OS. Use `create_disk()` + `save_basic_to_disk
 5. **Assuming memory state after ProDOS boot.** The Language Card is mapped, BASIC program space may have a STARTUP program loaded, etc.
 6. **Trying to use disk commands without DOS/ProDOS.** `load_basic_env()` gives you bare BASIC — no SAVE, LOAD, CATALOG, etc. Use `load_prodos_env()` or `load_dos33_env()` if you need disk commands.
 7. **Building ProDOS disks from scratch.** Just don't. Copy a template. See "Disk Images" section above.
-8. **Passing hex through the conversation.** Use `inject_tokenized_basic(source=...)` and `assemble(source=...)` — they handle everything server-side.
+8. **Passing hex through the conversation.** Use `inject_tokenized_basic(source=...)` and `assemble(source=...)` — they handle everything server-side. For binary data files (sprites, fonts, tables), write to a file and use `load_file(path=..., address=...)` instead of `load_binary(hex_data=...)`.
 
 ## Apple II Memory Map
 
