@@ -1529,9 +1529,10 @@ handle_command:
         lda #>ampersand_entry
         sta AMPER_VECTOR+2
 
-        ; Clear in_ui flag so ampersand hook works
+        ; Clear state so ampersand hook works cleanly
         lda #0
         sta in_ui
+        sta input_len            ; Prevent stale input from being sent on & return
         sta error_intercept_flag
         sta kbd_stuff_state
         sta program_error_flag

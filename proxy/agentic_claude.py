@@ -1448,7 +1448,7 @@ You are the user's AI programming partner. Be FAST for simple stuff!"""
 
                         # Stream tool result to Apple II
                         if result and tool_name != "apple2_send_status":
-                            if tool_name in ('emulator_read_screen', 'emulator_run_basic'):
+                            if tool_name in ('emulator_read_screen', 'emulator_run_basic', 'emulator_capture_graphics'):
                                 # Show emulator screen content so user can follow along
                                 self._stream_emulator_screen(result)
                             else:
