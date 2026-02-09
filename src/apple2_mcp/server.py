@@ -1053,6 +1053,21 @@ async def list_tools() -> list[Tool]:
                 }
             }
         ),
+
+        # Help
+        Tool(
+            name="help",
+            description="Get the Apple II MCP development guide — tool reference, tips, gotchas, disk image instructions, memory map, and common workflows. Call this first if you're new to Apple II development.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "topic": {
+                        "type": "string",
+                        "description": "Optional: filter to a specific topic (e.g., 'basic', 'assembly', 'disk', 'graphics', 'memory', 'quick start')"
+                    }
+                }
+            }
+        ),
     ]
 
 
@@ -2138,6 +2153,32 @@ RESULT_BTN = $0304
     elif name == "proxy_log":
         lines = args.get("lines", 50)
         return proxy_control.get_log(lines=lines)
+
+    elif name == "help":
+        readme_path = Path(__file__).parent / "README.md"
+        if not readme_path.exists():
+            return "Help file not found. Check apple2_mcp installation."
+        content = readme_path.read_text()
+        topic = args.get("topic", "").lower().strip()
+        if topic:
+            # Filter to relevant section(s)
+            sections = content.split("\n## ")
+            matches = []
+            for section in sections:
+                heading = section.split("\n")[0].lower()
+                if topic in heading:
+                    matches.append("## " + section)
+                else:
+                    # Check subsections too
+                    subsections = section.split("\n### ")
+                    for sub in subsections[1:]:
+                        sub_heading = sub.split("\n")[0].lower()
+                        if topic in sub_heading:
+                            matches.append("### " + sub)
+            if matches:
+                return "\n".join(matches)
+            return f"No section matching '{topic}'. Call help() without a topic to see all sections."
+        return content
 
     else:
         return f"Unknown tool: {name}"
