@@ -1173,7 +1173,11 @@ async def _call_tool_impl(name: str, args: dict[str, Any]) -> str:
         hex_data = args["hex_data"]
         # Parse hex string
         data = bytes.fromhex(hex_data.replace(' ', ''))
-        emu.poke(address, list(data))
+        # Load in chunks to avoid overflowing Bobbin's 8KB socket receive buffer
+        CHUNK = 2048
+        for offset in range(0, len(data), CHUNK):
+            chunk = data[offset:offset + CHUNK]
+            emu.load(address + offset, chunk.hex())
         return f"Loaded {len(data)} bytes at ${address:04X}"
 
     elif name == "load_file":
@@ -1187,7 +1191,12 @@ async def _call_tool_impl(name: str, args: dict[str, Any]) -> str:
             return f"ERROR: File is empty: {filepath}"
         if address + len(data) > 0x10000:
             return f"ERROR: File too large ({len(data)} bytes) for address ${address:04X} — would exceed 64KB"
-        emu.poke(address, list(data))
+        # Load in chunks using hex format to avoid overflowing Bobbin's 8KB socket receive buffer
+        # (poke sends JSON array ~4-5 chars/byte; load sends hex ~2 chars/byte; 2KB chunks stay well under 8KB)
+        CHUNK = 2048
+        for offset in range(0, len(data), CHUNK):
+            chunk = data[offset:offset + CHUNK]
+            emu.load(address + offset, chunk.hex())
         return f"Loaded {len(data)} bytes from {p.name} at ${address:04X} (${address:04X}-${address + len(data) - 1:04X})"
 
     # --- Screen ---
