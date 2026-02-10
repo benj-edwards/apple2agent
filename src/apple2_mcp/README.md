@@ -329,6 +329,7 @@ DOS 3.3 is simpler but a different OS. Use `create_disk()` + `save_basic_to_disk
 | Double lo-res | 80x48 pixels | 16 | (//e only) | `capture_dgr` |
 | Double hi-res | 560x192 pixels | 16 | (//e only) | `capture_dhgr` |
 
+- **PNG screenshots are auto-scaled 3x** for readability. Native Apple II resolutions are tiny — 280x192 is hard for AI vision to parse. If you need pixel-level precision, use the ASCII capture variants (`read_hgr_ascii`, `read_gr_ascii`, etc.) or `read_screen()` for text.
 - **GR and HGR both clear the screen** when called. Plan your drawing order accordingly.
 - **Mixed mode**: By default GR and HGR show 4 lines of text at the bottom. `POKE -16302,0` gives full-screen graphics.
 - **HGR color is weird.** The Apple II generates color from bit patterns and position. Adjacent pixels affect each other's color. Use `HCOLOR=` to set (0=black1, 1=green, 2=violet, 3=white1, 4=black2, 5=orange, 6=blue, 7=white2).

@@ -45,20 +45,33 @@ def get_emulator() -> Emulator:
     return _emulator
 
 
-def convert_ppm_to_png(ppm_path: str, png_path: str = None) -> str:
-    """Convert a PPM file to PNG format.
+# Default scale factor for PNG screenshots.
+# Apple II native resolutions are tiny (280x192, 560x192) — 3x makes them
+# readable for AI vision models where small details get lost.
+DEFAULT_PNG_SCALE = 3
+
+
+def convert_ppm_to_png(ppm_path: str, png_path: str = None,
+                       scale: int = None) -> str:
+    """Convert a PPM file to PNG format with optional scaling.
 
     Args:
         ppm_path: Path to the PPM file
         png_path: Output PNG path (default: replace .ppm with .png)
+        scale: Scale factor (default: DEFAULT_PNG_SCALE). Use 1 for native.
 
     Returns:
         Path to the PNG file
     """
+    if scale is None:
+        scale = DEFAULT_PNG_SCALE
     if png_path is None:
         png_path = ppm_path.rsplit('.', 1)[0] + '.png'
 
     img = Image.open(ppm_path)
+    if scale > 1:
+        new_size = (img.width * scale, img.height * scale)
+        img = img.resize(new_size, Image.NEAREST)
     img.save(png_path, 'PNG')
     os.unlink(ppm_path)  # Remove the temporary PPM
     return png_path
