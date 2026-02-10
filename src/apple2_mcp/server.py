@@ -591,7 +591,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="tokenize",
-            description="Tokenize BASIC source using Bobbin's built-in tokenizer.",
+            description="Tokenize BASIC source (returns byte count only). Prefer inject_tokenized_basic(source=...) which tokenizes and loads in one step.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1575,8 +1575,9 @@ async def _call_tool_impl(name: str, args: dict[str, Any]) -> str:
         source = args["source"]
         # Use pure Python tokenizer
         tokenized = tokenize_basic(source)
-        hex_str = ' '.join(f"{b:02X}" for b in tokenized)
-        return f"Tokenized {len(tokenized)} bytes\nHex: {hex_str}"
+        # Don't return hex — it wastes API tokens. Use inject_tokenized_basic(source=...) instead.
+        line_count = source.strip().count('\n') + 1
+        return f"Tokenized {line_count} lines into {len(tokenized)} bytes. Use inject_tokenized_basic(source=...) to load — no need to pass hex."
 
     elif name == "compare_tokenization":
         basic_line = args["basic_line"]
