@@ -872,21 +872,24 @@ async def list_tools() -> list[Tool]:
         # Assembly Language Tools
         Tool(
             name="assemble",
-            description="Assemble 6502 source code and load binary into emulator memory. Returns size and load address. Use call() to execute it.",
+            description="Assemble 6502 source code and load binary into emulator memory. Returns size and load address. Use call() to execute it. Prefer source_file over source for large programs to avoid sending assembly text through the API.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "source": {
                         "type": "string",
-                        "description": "6502 assembly source code (ca65 format)"
+                        "description": "6502 assembly source code (ca65 format). For large files, use source_file instead."
+                    },
+                    "source_file": {
+                        "type": "string",
+                        "description": "Path to a .s assembly source file on disk. Preferred over source for large programs — avoids sending source through the API."
                     },
                     "load_address": {
                         "type": "integer",
                         "default": 24576,
                         "description": "Load address for the code (default: $6000 = 24576)"
                     }
-                },
-                "required": ["source"]
+                }
             }
         ),
         Tool(
@@ -1914,15 +1917,30 @@ async def _call_tool_impl(name: str, args: dict[str, Any]) -> str:
 
     # --- Assembly Language Tools ---
     elif name == "assemble":
-        source = args["source"]
+        source_file = args.get("source_file")
+        source = args.get("source")
         load_address = args.get("load_address", 0x6000)
 
-        result = assemble(source, load_address)
+        include_paths = None
+        if source_file:
+            p = Path(source_file)
+            if not p.exists():
+                return f"ERROR: Source file not found: {source_file}"
+            source = p.read_text()
+            # Add source file's directory as include path for .include directives
+            include_paths = [str(p.parent)]
+        elif not source:
+            return "ERROR: Provide either source or source_file parameter"
+
+        result = assemble(source, load_address, include_paths=include_paths)
 
         if result["success"]:
-            # Auto-load into emulator memory (avoids hex going through Claude tokens)
-            hex_data = result["hex_data"].replace(' ', '')
-            emu.load(load_address, hex_data)
+            # Auto-load into emulator memory in chunks (avoids 8KB socket buffer overflow)
+            data = bytes(result["bytes"])
+            CHUNK = 2048
+            for offset in range(0, len(data), CHUNK):
+                chunk = data[offset:offset + CHUNK]
+                emu.load(load_address + offset, chunk.hex())
             return (
                 f"Assembly successful! Loaded {result['size']} bytes at ${load_address:04X}\n"
                 f"Use call(address={load_address}) to execute."
