@@ -348,7 +348,7 @@ async def list_tools() -> list[Tool]:
         # DHGR (Double Hi-Res) Graphics - 560x192, //e only
         Tool(
             name="capture_dhgr",
-            description="Capture DHGR (double hi-res) screen (560x192, //e with aux memory). Use 'png' for Claude to view.",
+            description="Capture DHGR (double hi-res) screen (560x192, //e with aux memory). Use 'png' for Claude to view. Use color=true for 16-color rendering.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -363,6 +363,11 @@ async def list_tools() -> list[Tool]:
                         "enum": ["png", "ppm", "ascii"],
                         "default": "png",
                         "description": "Output format (png=image for Claude, ppm=raw image, ascii=text art)"
+                    },
+                    "color": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Use 16-color DHGR rendering (140x192 scaled to 560x192). Default is monochrome 560x192."
                     },
                     "filename": {
                         "type": "string",
@@ -1330,30 +1335,34 @@ async def _call_tool_impl(name: str, args: dict[str, Any]) -> str:
     elif name == "capture_dhgr":
         page = args.get("page", 1)
         fmt = args.get("format", "png")
+        color = args.get("color", False)
         filename = args.get("filename")
 
         import time
         timestamp = int(time.time())
+        mode_str = "color" if color else "mono"
+        color_suffix = "_color" if color else ""
 
         if fmt == "png":
             # Capture as PPM first, then convert to PNG
-            ppm_file = f"/tmp/dhgr{page}_{timestamp}.ppm"
-            success = emu.capture_dhgr(ppm_file, page=page, format="ppm")
+            ppm_file = f"/tmp/dhgr{page}{color_suffix}_{timestamp}.ppm"
+            success = emu.capture_dhgr(ppm_file, page=page, format="ppm", color=color)
             if success:
                 if filename:
                     png_file = filename if filename.endswith('.png') else filename + '.png'
                 else:
-                    png_file = f"/tmp/dhgr{page}_{timestamp}.png"
+                    png_file = f"/tmp/dhgr{page}{color_suffix}_{timestamp}.png"
                 filename = convert_ppm_to_png(ppm_file, png_file)
         else:
             if not filename:
                 ext = "txt" if fmt == "ascii" else "ppm"
-                filename = f"/tmp/dhgr{page}_{timestamp}.{ext}"
-            success = emu.capture_dhgr(filename, page=page, format=fmt)
+                filename = f"/tmp/dhgr{page}{color_suffix}_{timestamp}.{ext}"
+            success = emu.capture_dhgr(filename, page=page, format=fmt, color=color)
 
         if success:
+            res_str = "140x192 16-color" if color else "560x192 mono"
             result = f"Captured DHGR{page} to: {filename}\n"
-            result += f"Format: {fmt} (560x192 mono)"
+            result += f"Format: {fmt} ({res_str})"
             result += f"\n\nUse the Read tool to view this file."
             return result
         else:

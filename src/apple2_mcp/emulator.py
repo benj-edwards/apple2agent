@@ -1058,7 +1058,7 @@ class Emulator:
         return "Saved" in output
 
     def capture_dhgr(self, filepath: str, page: int = 1,
-                     format: str = "ppm") -> bool:
+                     format: str = "ppm", color: bool = False) -> bool:
         """Capture DHGR (double hi-res) graphics to a file.
 
         Requires Apple //e with aux memory (128KB mode).
@@ -1067,6 +1067,8 @@ class Emulator:
             filepath: Output file path
             page: DHGR page (1 or 2)
             format: Output format ('ascii', 'ppm')
+            color: If True, render 140x192 16-color (scaled to 560x192).
+                   If False (default), render 560x192 monochrome.
 
         Returns:
             True if successful
@@ -1078,7 +1080,7 @@ class Emulator:
         # Note: control socket only supports PPM format
         if self.control_socket and format == "ppm":
             try:
-                result = self.control_socket.capture_dhgr(filepath, page=page)
+                result = self.control_socket.capture_dhgr(filepath, page=page, color=color)
                 return 'path' in result
             except ControlSocketError as e:
                 raise BobbinError(f"Control socket error: {e}")
@@ -1088,11 +1090,13 @@ class Emulator:
         if not was_in_debugger:
             self.enter_debugger()
 
-        # Build command based on format and page
+        # Build command based on format, page, and color
         page_suffix = "" if page == 1 else "2"
         if format == "ascii":
             cmd = f"sdha{page_suffix} {filepath}"
-        else:  # ppm
+        elif color:
+            cmd = f"sdhpc{page_suffix} {filepath}"
+        else:  # ppm mono
             cmd = f"sdhp{page_suffix} {filepath}"
 
         output = self.debugger_command(cmd)

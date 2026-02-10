@@ -384,17 +384,22 @@ class BobbinControlSocket:
         """
         return self.send_command({"cmd": "gr", "path": path, "page": page})
 
-    def capture_dhgr(self, path: str, page: int = 1) -> dict:
+    def capture_dhgr(self, path: str, page: int = 1, color: bool = False) -> dict:
         """Capture DHGR (double hi-res) graphics to a PPM file.
 
         Args:
             path: Output file path
             page: DHGR page (1 or 2)
+            color: If True, render 140x192 16-color (scaled to 560x192).
+                   If False (default), render 560x192 monochrome.
 
         Returns:
-            Dict with path, width, height
+            Dict with path, width, height, mode
         """
-        return self.send_command({"cmd": "dhgr", "path": path, "page": page})
+        cmd = {"cmd": "dhgr", "path": path, "page": page}
+        if color:
+            cmd["color"] = 1
+        return self.send_command(cmd)
 
     def capture_dgr(self, path: str, page: int = 1) -> dict:
         """Capture DGR (double lo-res) graphics to a PPM file.

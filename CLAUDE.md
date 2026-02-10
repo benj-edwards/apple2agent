@@ -1,11 +1,22 @@
 # Apple II Agent - THE MISSION
 
-## Bobbin Emulator Source
+## Bobbin Emulator — Official Maintainer
 
-**Canonical source:** a checkout of `bobbin-ai`
+**This agent is the official maintainer of Bobbin and the Apple II MCP server.**
+
+- **Bobbin repo:** `bobbin-ai` on GitHub
+- **MCP repo:** `apple2-mcp` on GitHub
+- **Canonical source:** a checkout of `bobbin-ai`
 
 The apple2agent project includes a copy of the Bobbin binary at `bobbin/src/bobbin`.
 When making changes to Bobbin, edit the canonical source and rebuild, then copy to this project.
+
+### Maintainer Responsibilities
+- Fix bugs in Bobbin emulator and control socket
+- Fix bugs in Apple II MCP server (`src/apple2_mcp/`)
+- Keep GitHub repos in sync with local canonical source
+- Support other agents/projects that depend on Bobbin or the MCP server
+- Maintain the 6502/Apple II reference library (`library/`)
 
 ## PRIMARY DIRECTIVE
 
@@ -405,6 +416,7 @@ tools/prodos_disk.py     # Reference library (not used by CLI)
 | `tools/create_snapshots.py` | **Creates environment snapshots** - BASIC and ProDOS states |
 | `states/` | Pre-baked environment snapshots for instant loading |
 | `bobbin_socket.md` | Control socket design document |
+| `library/` | **6502/Apple II reference library** - instruction set, ca65, ld65, ProDOS MLI, soft switches, memory map, ROM routines |
 
 ## Commands
 
