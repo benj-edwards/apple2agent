@@ -30,11 +30,16 @@ Use the `source` parameter (not `hex_data`) — it tokenizes server-side and avo
 ### Write and run 6502 assembly
 
 ```
+# Small inline snippets:
 assemble(source=".org $6000\n  LDA #$41\n  JSR $FDED\n  RTS", load_address=24576)
+call(address=24576)
+
+# Large programs (preferred — reads from file, saves tokens):
+assemble(source_file="asm/mycode.s", load_address=24576)
 call(address=24576)
 ```
 
-`assemble` auto-loads the binary into emulator memory. Just `call()` to execute.
+`assemble` auto-loads the binary into emulator memory. Just `call()` to execute. Use `source_file` for anything beyond a few lines — it reads from disk and avoids sending source through the API.
 
 ### See what happened
 
@@ -51,12 +56,15 @@ These patterns avoid passing large hex strings through the conversation:
 | Instead of... | Do this |
 |---------------|---------|
 | `tokenize()` then `inject_tokenized_basic(hex_data=...)` | `inject_tokenized_basic(source="10 ...")` |
+| `assemble(source=<huge source>)` | `assemble(source_file="asm/mycode.s")` — reads from disk |
 | `assemble()` then `load_binary(hex_data=...)` | `assemble(source="...")` — auto-loads |
 | `load_binary(hex_data="A9 00 8D...")` for data files | `load_file(path="/path/to/file.bin", address=0x6000)` |
 
 NEVER call `tokenize` and then pass the hex result to `inject_tokenized_basic`. Just pass source directly.
 
 NEVER call `assemble` and then pass hex to `load_binary`. `assemble` already loads into memory.
+
+For **large assembly files**, use `assemble(source_file="asm/mycode.s")` instead of `assemble(source=...)`. This reads the source from disk — zero assembly text flows through the API. The source file's directory is automatically added as an include path, so `.include` directives work.
 
 NEVER pass large hex strings via `load_binary`. Write data to a file, then use `load_file` to load it directly into memory. This applies to sprite data, font tables, lookup tables, pre-built binaries, etc.
 
@@ -95,7 +103,7 @@ NEVER pass large hex strings via `load_binary`. Write data to a file, then use `
 
 | Tool | Description |
 |------|-------------|
-| `assemble` | Assemble ca65 source and auto-load into memory |
+| `assemble` | Assemble ca65 source and auto-load. Use `source_file` for large files, `source` for small snippets |
 | `call` | Execute code at address (JSR — code must end with RTS) |
 | `asm_templates` | List/get assembly code templates |
 
