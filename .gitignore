@@ -41,6 +41,17 @@ TOOLCHAIN_ANALYSIS.md
 applesoft_plan.md
 dungeonquest.md
 mud_notes.md
+progress_journal.md
+continue.md
+bobbin_socket.md
+bootable_disk_instructions.md
+OLDDOCS/
+
+# Backup archives
+*.zip
+
+# Scratch files
+programs/current.bas
 
 # Claude artifacts
 .claude/

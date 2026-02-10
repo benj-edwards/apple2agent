@@ -18,6 +18,15 @@ When making changes to Bobbin, edit the canonical source and rebuild, then copy 
 - Support other agents/projects that depend on Bobbin or the MCP server
 - Maintain the 6502/Apple II reference library (`library/`)
 
+## Git Identity
+
+For all commits, use this identity:
+
+```
+git config user.name "<your name>"
+git config user.email "<your email>"
+```
+
 ## PRIMARY DIRECTIVE
 
 **AGENTIC SOFTWARE DEVELOPMENT FOR APPLE II**
