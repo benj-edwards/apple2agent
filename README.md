@@ -1,68 +1,71 @@
 # Apple II Agent
 
-**An autonomous AI coding environment for Apple II.** You talk naturally, Claude writes Applesoft BASIC or 6502 assembly, tests it in an emulator, and deploys the working code to your real Apple II over Ethernet.
+**Type a wish on your Apple II. Watch Claude build it. Press RETURN and play.**
+
+You talk to your Apple II in plain English. Claude writes the program (Applesoft BASIC or 6502 assembly), tests it in an Apple //e emulator exactly the way your machine will run it, looks at the screen, fixes what's wrong, and sends it over Ethernet to your real Apple II, ready to run. When you're done, press ESC and you're back at the `AGENT>` prompt, ready to ask for changes.
 
 ```
-AGENT> make a starfield animation in hi-res
-  [Claude writes HGR code, injects into emulator, tests it, fixes a bug,
-   re-tests, deploys to Apple II]
-Apple II: [displays starfield]
-```
+AGENT> make a breakout game in hi-res with a score and sound
 
-This is **Claude Code for Apple II** — an agentic loop where you watch Claude work, step by step, on your 40-column screen.
+DRAWING THE PADDLE AND BRICKS FIRST.
+* WRITING CODE
+  JSR DRAWBRICKS
+  LDA PADDLEX
+  ...
+  WROTE BREAKOUT.S (412 LINES)
+* TESTING BREAKOUT.S IN EMULATOR
+  (PREVIEW ON YOUR SCREEN - ANY KEY = LOG)
+THE BALL PASSES THROUGH THE TOP ROW - FIXING THE COLLISION CHECK.
+* EDITED BREAKOUT.S LINE 188
+* TESTING BREAKOUT.S IN EMULATOR
+* SENDING BREAKOUT TO YOUR APPLE II
+
+BREAKOUT! ARROWS MOVE THE PADDLE, SPACE
+LAUNCHES. ESC BRINGS YOU BACK HERE.
+
+*** BREAKOUT IS READY! ***
+RETURN = RUN IT   (OR TYPE TO CHAT)
+```
 
 ## How It Works
 
-An Apple II with a [Uthernet II](http://a2retrosystems.com/products.htm) Ethernet card connects to a Python proxy over TCP. The proxy talks to the Claude API, which has access to a full suite of development tools — an emulator, assembler, BASIC tokenizer, disk tools, and a deployment channel back to the real hardware.
+An Apple II with a [Uthernet II](http://a2retrosystems.com/products.htm) Ethernet card connects to a Python proxy on your network. The proxy runs the agent loop with Claude, which has its own Apple //e emulator to test in.
 
 ```
 ┌──────────────┐     TCP/IP      ┌──────────────┐      API       ┌──────────┐
 │   Apple II   │◄───────────────►│    Proxy     │◄──────────────►│  Claude  │
-│  Uthernet II │  A2P Protocol   │   Server     │   Anthropic    │   API    │
+│  Uthernet II │  A2P Protocol   │  port 6502   │                │ Opus 5.5 │
 └──────────────┘                 │              │                └──────────┘
-                                 │  Emulator    │
-                                 │  Bridge  ────┼──► Bobbin (Apple //e emulator)
-                                 │              │
-                                 │  Assembler   │
+                                 │  Test     ───┼──► Bobbin (Apple //e emulator)
+                                 │  harness     │
                                  │  Tokenizer   │
-                                 │  Disk Tools  │
+                                 │  ca65/ld65   │
                                  └──────────────┘
 ```
 
-1. You type a request on the Apple II
-2. The agent sends it to the proxy via TCP (A2P protocol)
-3. The proxy calls Claude with development tools
-4. Claude writes code (BASIC or 6502 assembly)
-5. Claude boots the emulator, injects the code, and tests it
-6. If something's wrong, Claude reads the screen, fixes the bug, and retests
-7. Once working, Claude deploys the code to your Apple II
-8. You run the program
-
-The agentic loop runs up to 20 tool-use turns per request. Claude streams status updates to the Apple II in real-time so you can watch it work.
+1. You type a request at `AGENT>`.
+2. Claude plans, then writes the program. You see its progress notes, and the code scrolls by as it's written.
+3. Claude runs it in the emulator, launched exactly the way your Apple II will launch it (same memory layout, same return hooks), presses keys, and **looks at the screen**. Hi-res screenshots come back to Claude as real color images, and they show up on your Apple II as live previews.
+4. Claude fixes problems and retests until it works.
+5. The program streams to your Apple II, which shows **READY**. Press RETURN to run it.
+6. **ESC** (or Ctrl-Reset) brings you back to the agent. If the program crashed or hit an error, the agent says so and pre-fills `FIX: ...`, so one RETURN gets Claude working on it.
 
 ## What It Can Do
 
-- **Applesoft BASIC** — generates, tokenizes, and injects programs directly into memory
-- **6502 Assembly** — assembles ca65 source, loads into emulator, calls routines
-- **All graphics modes** — lo-res (GR), hi-res (HGR), double hi-res (DHGR), double lo-res (DGR)
-- **Emulator testing** — boots Bobbin, runs code, reads screen output, captures graphics, iterates until working
-- **Memory access** — peek, poke, load binaries, inspect and modify machine state
-- **Disk management** — save programs to ProDOS disks, list catalogs, manage files
-- **Code versioning** — undo/redo with `/UNDO` and `/VERSIONS`
-- **Web search** — Claude can look up Apple II documentation and programming references
-- **Natural language at BASIC prompt** — type anything at `]` and if BASIC can't parse it, it goes to Claude automatically
+- **Games and demos in hi-res**: Claude sees the screenshots, so it can judge and fix graphics, not just code.
+- **Big programs**: on a 128K //e the agent moves itself into auxiliary memory while your program runs, so the program gets nearly all of main memory (`$0800-$BEFF`, about 46K). On 64K machines programs get `$0800-$5FFF`.
+- **Applesoft BASIC**: tokenized on the proxy and placed around the hi-res pages automatically (variables go above HGR, so drawing never corrupts them).
+- **6502 assembly**: ca65 syntax, any load address from `$0800`, 65C02 opcodes allowed on an enhanced //e.
+- **Always a way back**: ESC in the program, ESC at the `]` prompt, `&`, Ctrl-Y, Ctrl-Reset, or a crash into BRK all return to `AGENT>` with your conversation intact.
+- **Iterate**: "make the aliens faster", "add a high score". Claude remembers the program. `/RUN` plays it again and `/UNDO` brings back the previous version.
 
 ## Requirements
 
-- **Apple II** (or IIe/IIgs) with a **Uthernet II** Ethernet card
-- **Python 3.8+**
+- **Apple IIe** (enhanced, 128K recommended) with a **Uthernet II** card in slot 3. An emulator works too.
+- **Python 3.10+** on the computer running the proxy
 - **Anthropic API key** ([get one here](https://console.anthropic.com/))
-- **Bobbin** emulator (included as binary, or [build from source](https://github.com/benj-edwards/bobbin-ai))
-
-### Optional
-
-- **cc65** — to rebuild the Apple II agent client from 6502 assembly source
-- **Claude Code** with **apple2-mcp** — for interactive emulator access from your terminal
+- **cc65** (`ca65`/`ld65`): Claude assembles machine-code programs with it, and it builds the Apple II client
+- **Bobbin** emulator (included, or [build from source](https://github.com/benj-edwards/bobbin-ai))
 
 ## Quick Start
 
@@ -72,7 +75,7 @@ The agentic loop runs up to 20 tool-use turns per request. Claude streams status
 ./setup.sh
 ```
 
-Installs Python dependencies and prompts for your Anthropic API key (stored in `proxy/.env`).
+Creates `.venv` with the Python dependencies and asks for your Anthropic API key (stored in `proxy/.env`).
 
 ### 2. Start the Proxy
 
@@ -80,210 +83,171 @@ Installs Python dependencies and prompts for your Anthropic API key (stored in `
 ./proxy.sh start
 ```
 
-The proxy listens on port 8080 and bridges your Apple II to Claude.
+The proxy listens on **port 6502**.
 
 ### 3. Boot the Apple II
 
-Boot from `disks/agent_contiguous.dsk`. The agent binary loads automatically. If your proxy is on a different IP:
+Boot `disks/agent_contiguous.dsk` (a 5.25" image). ProDOS starts the agent, which finds the proxy on your network by itself and remembers it. If the proxy is on another network (so the agent's broadcast can't reach it), tell it where:
 
 ```
 /SETIP 192.168.1.100
 ```
 
-### 4. Talk Naturally
+On a Floppy Emu or similar SD card adapter, the image must sit in one unbroken piece on the card. Copy it with `python3 tools/copy_to_card.py disks/agent_contiguous.dsk "/Volumes/<card>/<folder>/Apple II Agent.dsk"`.
+
+The disk uses ProDOS 1.9. Disks with the first ProDOS 2.4 release crashed a real //e at boot (`2002-`) while emulators booted them fine, so `make disk` (`tools/build_agent_disk.py`) starts from a ProDOS 1.9 disk that has booted on real hardware and adds the agent with [AppleCommander](https://applecommander.github.io/) rather than writing disk structures itself.
+
+### 4. Ask for Anything
 
 ```
 AGENT> make a number guessing game
 AGENT> draw a mandelbrot set in hi-res
-AGENT> write a sort routine in assembly at $6000
-AGENT> create a lo-res animation with all 16 colors
+AGENT> make a space invaders game in 6502 assembly
+AGENT> make the invaders speed up as you clear them
 ```
 
-Claude handles everything — writing, testing, debugging, deploying.
+When the program is ready, press **RETURN** to run it. Press **ESC** to come back.
 
-### 5. Run Your Program
-
-```
-AGENT> /EXIT              ← drop to BASIC
-] RUN                     ← run the program
-] &                       ← return to agent (or Ctrl-Y)
-```
+While Claude works, **ESC** asks it to stop; ESC again stops waiting.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `/EXIT` or `/SUSPEND` | Drop to BASIC prompt to run your program |
-| `/AGENT` | Toggle agentic mode on/off (on by default) |
-| `/CODE <desc>` | Generate BASIC code directly (bypasses agentic loop) |
-| `/CHAT <msg>` | Chat without code generation |
-| `/MODEL S\|O\|H` | Switch Claude model (Sonnet / Opus / Haiku) |
-| `/LIMIT <n>` | Set max agentic turns (1-100, default 20) |
-| `/UNDO` | Restore previous program version |
-| `/VERSIONS` | Show program version history |
-| `/PROMPT <text>` | Set custom system prompt (e.g. `/PROMPT talk like a pirate`) |
-| `/DISPLAY 40\|40L\|80` | Set display mode (40-col, 40-col lowercase, 80-col) |
-| `/CLEAR` | Clear conversation history |
-| `/RESET` | Full session reset |
-| `/SETIP x.x.x.x` | Set proxy IP address |
-| `/PORT xxxx` | Set proxy port |
-| `/IP` | Show connection info |
-| `/HELP` | Show command list |
-
-After `/EXIT`, type `RUN` at the `]` prompt. Return to the agent with `&` or Ctrl-Y.
+| `/RUN` | Run your program again (from a fresh copy if it changed itself) |
+| `/UNDO` | Bring back the previous program |
+| `/VERSIONS` | Programs sent this session |
+| `/SEND <FILE>` | Send a program from the proxy's `programs/` folder as is |
+| `/RESET` | Forget the conversation, start fresh |
+| `/MODEL O\|S\|H` | Opus 5.5 (default), Sonnet 5.5, Haiku 5.5 |
+| `/EFFORT LOW\|MEDIUM\|HIGH\|XHIGH\|MAX` | How hard Claude thinks (default medium) |
+| `/LIMIT <n>` | Max agent steps per request (default 60) |
+| `/PROMPT <text>` | Standing instructions (e.g. `/PROMPT always use sound`) |
+| `/DISPLAY 40\|40L\|80` | 40-column uppercase, 40 mixed case, or 80 columns (programs always start in 40) |
+| `/EXIT` | Drop to the `]` prompt (come back with ESC, `&` or Ctrl-Y) |
+| `/CLEAR` | Clear the screen |
+| `/SETIP x.x.x.x` | Set the proxy's IP address (only needed if it isn't found automatically) |
+| `/PORT n` | Set the proxy's port |
+| ESC | Clear the line you're typing; while Claude works, stop it |
+| `/IP` | Show the proxy address |
+| `/HELP` | Show commands |
 
 ## Proxy Server
 
-The proxy is the bridge between the Apple II and Claude. It manages the TCP connection, the Claude API session, the emulator, and code deployment.
-
-### Control
-
 ```bash
-./proxy.sh start      # Start proxy (port 8080)
+./proxy.sh start      # Start proxy (port 6502)
 ./proxy.sh stop       # Stop proxy
 ./proxy.sh status     # Check if running
 ./proxy.sh log        # Tail log output
 ./proxy.sh restart    # Restart
 ```
 
-Or use MCP tools from Claude Code: `proxy_start`, `proxy_stop`, `proxy_status`, `proxy_log`.
+Or use the MCP tools from Claude Code: `proxy_start`, `proxy_stop`, `proxy_status`, `proxy_log`.
 
-### Agentic Tools
+### Claude's Tools
 
-When agentic mode is on (the default), Claude has access to these tools during each request:
+| Tool | What it does |
+|------|--------------|
+| `write_file` / `edit_file` / `read_file` | Source files in `programs/` (`.BAS` or `.S`) |
+| `run_in_emulator` | Build, launch in a fresh //e exactly like the real launch, type keys, wait, look. Reports running / ended / error / crashed / exited, the text screen, color screenshots, and memory-safety problems |
+| `emulator_input` | Keep playing the running program |
+| `emulator_memory` | Hex dump, registers and assembler labels, for debugging machine code |
+| `deploy_to_apple` | Send the program to the Apple II's READY screen |
+| `web_search` | Look things up |
 
-**Emulator:**
-
-| Tool | Description |
-|------|-------------|
-| `emulator_load_env` | Instant start — load BASIC, ProDOS, or DOS 3.3 environment |
-| `emulator_boot` | Cold boot the emulator (slower, use `load_env` instead) |
-| `emulator_inject_basic` | Tokenize and inject BASIC program into memory |
-| `emulator_run_basic` | Execute a BASIC command and wait for prompt |
-| `emulator_read_screen` | Read the 40x24 text screen |
-| `emulator_read_basic_program` | Detokenize the program currently in memory |
-| `emulator_capture_graphics` | Capture lo-res or hi-res screen as ASCII art |
-| `emulator_type` | Type keystrokes into the emulator |
-| `emulator_peek` | Read bytes from memory |
-| `emulator_poke` | Write bytes to memory |
-| `emulator_assemble` | Assemble 6502 code (ca65) and load into memory |
-| `emulator_call` | JSR to a machine language routine |
-
-**Deployment (to real Apple II):**
-
-| Tool | Description |
-|------|-------------|
-| `apple2_send_code` | Deploy BASIC program to Apple II |
-| `apple2_send_binary` | Deploy assembled machine code to Apple II |
-| `apple2_send_message` | Display a message on the Apple II |
-| `apple2_send_status` | Update the Apple II status line |
-
-**Disk:**
-
-| Tool | Description |
-|------|-------------|
-| `disk_save_basic` | Save BASIC program to ProDOS disk |
-| `disk_save_binary` | Save binary file to disk |
-| `disk_save_text` | Save text file to disk |
-| `disk_list` | List files on current disk |
-
-**Other:**
-
-| Tool | Description |
-|------|-------------|
-| `web_search` | Search the web for Apple II documentation |
-
-### Configuration
-
-API key is stored in `proxy/.env`:
+The API key lives in `proxy/.env`:
 
 ```
 ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
 ```
 
-Copy `proxy/.env.example` and fill in your key.
+## Testing with the Emulator Only
 
-## Testing with Emulator Only
+No hardware needed. With Claude Code and the apple2-mcp server:
 
-You don't need real hardware to develop. If you have Claude Code with the [apple2-mcp](https://github.com/benj-edwards/apple2-mcp) server:
-
-```bash
-# Boot emulator with agent disk and Uthernet II
-boot(machine="enhanced", uthernet2=true, disk="disks/agent_contiguous.dsk")
-
-# Start the proxy
+```
+boot(machine="enhanced", uthernet2=true, disk="disks/agent_contiguous.dsk", wait_for_prompt=false)
 proxy_start()
-
-# The agent connects automatically — use it from read_screen()
 ```
 
-Or use the emulator standalone for BASIC/assembly development without the proxy.
+The emulated Apple II finds the proxy the same way a real one does (Bobbin passes its broadcast to this machine and forwards 192.168.64.x/65.x to localhost).
+
+### Automated tests
+
+```bash
+tests/run_all.sh              # everything that needs no API calls (~15 minutes)
+tests/run_all.sh --real-speed # ...plus the end-to-end run at a real 1 MHz
+.venv/bin/python tests/live_agent.py "make a breakout game" --start-proxy   # one real request
+```
+
+The emulated Uthernet II behaves like a real network peer (full-size TCP segments, resends, the Apple's window), and Claude's own test emulator runs at real speed with uninitialized memory, so what passes here is what a real Apple II will see. Tests run one at a time: their proxies all answer discovery on UDP 6502.
+
+## How Programs Get Back to the Agent
+
+The agent reserves `$03C7-$03FF` in page 3 (the rest of page 3 is free for programs):
+
+| Address | Purpose |
+|---------|---------|
+| `$03C7` | Crash marker |
+| `$03C8` | BRK vector target: marks a crash, goes to `$03D0` |
+| `$03D0` | The way home. Resident: `JMP` into the agent. Exchange: `STA $C003`, so the next instruction comes from aux memory, where the agent is waiting |
+| `$03D3` | Keyboard hook: ESC at the `]` prompt goes home |
+| `$03F0-$03FA` | BRK, reset, `&` and Ctrl-Y vectors, all pointed home |
+
+In EXCHANGE mode (128K) the program bytes are staged in aux memory while they download. At launch the program's low pages are copied into main memory and `$6000-$BEFF` (where the agent lives) is swapped with aux by a small routine in the stack page. The return trip swaps it back. The staged copy stays in aux, so `/RUN` starts the program fresh.
 
 ## Project Structure
 
 ```
 proxy/                    # Proxy server (Python)
-  unified_proxy.py        # Main proxy — TCP server, session management
-  agentic_claude.py       # Claude API integration, tool loop, streaming
-  emulator_bridge.py      # Connects proxy to Bobbin via control socket
-  basic_tokenizer_streaming.py  # Applesoft BASIC tokenizer
-  proxyctl.py             # Proxy control script (start/stop/status)
+  unified_proxy.py        # TCP server, sessions, commands, deploy packets
+  agentic_claude.py       # Claude agent loop: tools, streaming, previews
+  deploy.py               # Program building and memory layout (BASIC + ca65)
+  emulator_bridge.py      # Test harness on Bobbin's control socket
+  basic_tokenizer_streaming.py  # Applesoft tokenizer
+  a2p_protocol.py         # Wire protocol
 
-asm/                      # Apple II client (6502 assembly, ca65)
-  agent.s                 # Main agent — UI, TCP, A2P protocol, display
+asm/                      # Apple II client (6502, ca65)
+  agent.s                 # UI, TCP, A2P protocol, display
+  agent_deploy.s          # Deploy, launch, return-to-agent
+  agent_sysload.s         # AGENT.SYSTEM loader ($2000 -> $6000)
 
-src/apple2_mcp/           # MCP server for Claude Code integration
-  server.py               # Tool definitions and handlers
-  emulator.py             # Bobbin emulator wrapper
-  control_socket.py       # Unix socket client for Bobbin
-
-disks/                    # Disk images
-  agent_contiguous.dsk    # Ready-to-boot ProDOS disk with agent
-  ProDOS_2_4.dsk          # Clean ProDOS 2.4 master disk
-
-states/                   # Pre-baked emulator snapshots
-  basic.state             # Bare BASIC (instant boot)
-  prodos.state            # ProDOS BASIC (instant boot)
-  dos33.state             # DOS 3.3 BASIC (instant boot)
-
+programs/                 # Claude's workspace (program sources, history/)
+src/apple2_mcp/           # MCP server for Claude Code
+disks/agent_contiguous.dsk  # Boot disk: PRODOS, AGENT.SYSTEM, BASIC.SYSTEM
+states/                   # Emulator snapshots used by the test harness
 library/                  # 6502/Apple II reference library
-tools/                    # Disk management utilities
+tools/                    # Disk tools
 ```
 
 ## The A2P Protocol
 
-The Apple II agent and proxy communicate over TCP using the A2P (Apple II Protocol) binary format:
+Packets are `'A2' type len(2) seq data... checksum` over TCP.
 
-| Type | Name | Description |
-|------|------|-------------|
-| 0x00 | INIT | Initialize connection |
-| 0x01 | CHAT | User message (Apple II → proxy) |
-| 0x02 | RESP | AI response, streamed (proxy → Apple II) |
-| 0x03 | CODE | Tokenized BASIC code chunk (proxy → Apple II) |
-| 0x04 | STATUS | Status update (proxy → Apple II) |
-| 0x05 | ACK | Acknowledgment |
+| Type | Name | Direction | Description |
+|------|------|-----------|-------------|
+| 0x00 | INIT | Apple → proxy | Capabilities (80-col, 128K, deploy support), model, display, version |
+| 0x01 | CHAT | Apple → proxy | What you typed |
+| 0x02 | RESP | proxy → Apple | Text for the scrolling log |
+| 0x03 | CODE | proxy → Apple | BASIC at `$0801` (old clients) |
+| 0x04 | STATUS | proxy → Apple | Status line; `DONE` ends a response |
+| 0x05 | ACK | both | Acknowledgment |
+| 0x07 | LOAD | proxy → Apple | Program bytes: address + data |
+| 0x08 | DEPLOY | proxy → Apple | Start a transfer: main or aux, program or preview |
+| 0x09 | RUN | proxy → Apple | Launch descriptor; the Apple shows READY |
+| 0x0A | SHOW | proxy → Apple | Text or HGR preview |
 
 ## Building from Source
 
-The Apple II agent client is written in 6502 assembly (ca65/ld65):
-
 ```bash
-make agent              # Build AGENT.BIN
-make install-agent      # Build and install to agent disk
+make disk               # Build AGENT.SYSTEM and a fresh boot disk
 ```
 
-Requires the [cc65](https://cc65.github.io/) toolchain.
+Requires [cc65](https://cc65.github.io/).
 
 ## Bobbin Emulator
 
-The proxy uses [Bobbin](https://github.com/benj-edwards/bobbin-ai), an Apple II emulator with a Unix socket control interface designed for AI integration. Bobbin supports:
-
-- Apple II+ and enhanced //e emulation
-- Uthernet II network card (virtual bridge to host)
-- JSON control protocol over Unix socket (multi-client, up to 16 simultaneous connections)
-- State save/load (128KB snapshots)
-- Graphics export (GR, HGR, DHGR, DGR — mono and 16-color)
-- CPU stepping, breakpoints, watchpoints, instruction tracing
+The proxy uses [Bobbin](https://github.com/benj-edwards/bobbin-ai), an Apple II emulator with a JSON control socket designed for AI integration: Apple II+ and enhanced //e, Uthernet II with a virtual bridge to the host, 128KB state snapshots, GR/HGR/DHGR/DGR export, stepping, breakpoints and tracing.
 
 ## License
 

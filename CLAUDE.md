@@ -49,88 +49,57 @@ Apple II: [displays circle]
 
 ## THE AGENTIC LOOP (This is the core feature!)
 
-**Agentic mode is ON by default.** Every message triggers the full development loop.
+**Agentic mode is ON by default.** Every message runs the full loop in `proxy/agentic_claude.py`:
 
-`/AGENT` command toggles it OFF if you just want simple chat (rare).
+1. Claude (Opus 5.5 by default, streaming, adaptive thinking, `display: "updates"`) writes the program into `programs/` with `write_file`/`edit_file`.
+2. `run_in_emulator` builds it (`proxy/deploy.py`: Applesoft tokenizer or ca65/ld65) and launches it in a fresh Bobbin **exactly the way the real Apple II will** (same memory layout, same page-3 return hooks), types keys, waits, and reports: running / ended at ] / BASIC error / crashed into BRK / exited to agent, the text screen, a **color PNG screenshot** (Claude sees it), and memory-safety problems (writes into agent memory, page-3 hooks, $BF00).
+3. Claude fixes and retests, then `deploy_to_apple` streams it to the Apple II, which shows **READY - RETURN TO RUN**.
+4. ESC (program-implemented), ESC at ] or at an INPUT prompt, &, Ctrl-Y, Ctrl-Reset or BRK all return to `AGENT>`. Crashes and BASIC errors come back pre-filled as `FIX: ...`.
 
-### What Happens When You Type Anything:
-- Claude gets access to tools:
-  - `emulator_boot` - Start Bobbin emulator
-  - `emulator_inject_basic` - Load BASIC program
-  - `emulator_run_basic` - Run commands
-  - `emulator_read_screen` - See output
-  - `emulator_assemble` - Assemble 6502 code
-  - `apple2_send_code` - Deploy to real Apple II
-- Claude runs up to 20 turns of tool use
-- Tests in emulator, then deploys to real hardware
-
-**Key file:** `proxy/agentic_claude.py` - The entire agentic loop
+Everything streams to the Apple II while it happens: progress notes, tool steps, code lines as they're written, emulator text output, and **HGR screenshots as live previews** (SHOW packet; any key flips back to the log).
 
 ## Architecture
 
 ```
 ┌──────────────┐      TCP/IP      ┌──────────────┐      API      ┌──────────┐
 │   Apple II   │◄────────────────►│    Proxy     │◄─────────────►│  Claude  │
-│  (Uthernet)  │   A2P Protocol   │              │   + Tools     │   API    │
-└──────────────┘                  │  agentic_    │               └──────────┘
-       ▲                          │  claude.py   │
-       │                          │      │       │
-       │                          │      ▼       │
-       │                          │  emulator_   │
-       │                          │  bridge.py   │
-       │                          │      │       │
-       │                          └──────┼───────┘
-       │                                 │ Unix Socket
-       │                                 ▼
-       │                          ┌──────────────┐
-       └──────────────────────────│   Bobbin     │
-              Deploy code         │  Emulator    │
+│  (Uthernet)  │   A2P (port 6502)│  agentic_    │   + Tools     │ Opus 5.5 │
+└──────────────┘                  │  claude.py   │               └──────────┘
+ AGENT.SYSTEM                     │  deploy.py   │
+                                  │  emulator_   │──► test Bobbin (bridge socket)
+                                  │  bridge.py   │
                                   └──────────────┘
 ```
 
-**Two ways to control emulator:**
-1. **Proxy** uses `emulator_bridge.py` → control socket (for agentic loop)
-2. **Claude Code** uses MCP server → control socket (for interactive testing)
+**Two ways to control an emulator:**
+1. **Proxy** uses `emulator_bridge.py` → its own test Bobbin (`/tmp/bobbin_bridge.sock`)
+2. **Claude Code** uses the MCP server → `/tmp/bobbin.sock` (e.g. the emulated "real" Apple II)
+
+### Launch modes (asm/agent_deploy.s + proxy/deploy.py must agree)
+
+- **EXCHANGE** (128K //e, the normal case): program may use `$0800-$BEFF`. LOAD bytes are staged in **aux** memory. At launch a blob in the stack page copies the program's pages below `$6000` aux→main and swaps `$6000-$BEFF` main↔aux. Return swaps back. `/RUN` replays from the pristine aux copy.
+- **RESIDENT** (64K): program in `$0800-$5FFF`, agent stays at `$6000+`.
+
+Page 3 contract: `$03C7` crash mark, `$03C8` BRK stub, `$03D0` return entry (resident `JMP agent_reentry`; exchange `STA $C003` → aux `$03D3` `JMP agent_xreturn`), `$03D3` KSW hook (ESC typed into GETLN, i.e. RDKEY called from `$FDxx`: the `]` prompt or an INPUT line; GET still gets ESC), `$03F0-$03FA` vectors. Programs own `$0300-$03C6`.
 
 ## Quick Start
 
 ### 1. Start Proxy
 ```bash
-cd proxy && python3 proxyctl.py start
+./proxy.sh start            # or MCP proxy_start(port=6502)
 ```
+API key in `proxy/.env`. Python deps live in `.venv` (`./setup.sh`); `unified_proxy.py` re-execs itself into `.venv` when started with the system python3.
 
-API key in `proxy/.env`:
+### 2. Boot the Apple II (emulated)
 ```
-ANTHROPIC_API_KEY=sk-ant-...
+mcp__apple2-mcp__boot(machine="enhanced", uthernet2=true, disk="disks/agent_contiguous.dsk", wait_for_prompt=false)
 ```
+The disk boots **PRODOS → AGENT.SYSTEM** directly (no BASIC.SYSTEM, no BRUN). The agent finds the proxy by broadcast (`A2AGENT?` to UDP 6502; the proxy answers with its port) and goes straight to `AGENT>`. Bobbin passes the broadcast to localhost and routes 192.168.64.x/65.x to localhost. A found address is saved to `CLAUDECONF` on the boot disk.
 
-### 2. Boot Emulator
-```
-mcp__apple2-mcp__boot(machine="enhanced", uthernet2=true, disk="disks/agent_contiguous.dsk")
-```
-
-**Note:** Use `agent_contiguous.dsk` - it has proper boot blocks and contiguous file allocation for hardware disk emulators.
-
-### 3. Run Agent
-```
-BRUN AGENT.BIN
-```
-
-### 4. Talk Naturally (Agentic mode is ON by default)
+### 3. Talk Naturally
 - "Make a program that prints the Fibonacci sequence"
-- "Draw a house using HGR graphics"
-- "Create a number guessing game"
-
-Claude will:
-1. **Stream status updates to Apple II** - you see everything happening in real-time
-2. Boot the emulator
-3. Write the code
-4. Inject and test it
-5. Fix any bugs (iterate until working)
-6. Deploy to your Apple II
-7. Tell you when it's ready
-
-**Just like Claude Code** - you watch Claude work, step by step, on your Apple II screen.
+- "Make a breakout game in hi-res"
+- `/SEND TESTHGR.BAS` sends a workspace file without Claude (good for testing deploys)
 
 ## Bobbin Control Socket (USE THIS!)
 
@@ -175,10 +144,13 @@ sock.step(100)  # Single-step 100 instructions
 sock.pause()    # Pause emulation
 sock.resume()   # Resume
 
-# Breakpoints
+# Breakpoints (stop *before* the instruction; poll cpu() for paused/break_hit)
 sock.break_set(0x6000)   # Break at address
 sock.watch_set(0x400)    # Break when memory changes
 bps = sock.break_list()  # List all breakpoints
+cpu = sock.get_cpu_state()  # ... 'paused': True, 'break_hit': <id>
+sock.resume()            # runs the instruction it stopped on, then can stop there again
+# (The first visit to $2000 is the PRODOS kernel's loader, the second is AGENT.SYSTEM.)
 
 # Disks
 sock.disk_insert('/path/to/disk.dsk', drive=1)
@@ -225,74 +197,29 @@ The MCP server (`emulator.py`) automatically uses the socket when available and 
 
 ## Emulator Bridge (FOR THE PROXY)
 
-**`proxy/emulator_bridge.py`** provides the connection between the agentic loop and Bobbin.
+**`proxy/emulator_bridge.py`** runs the proxy's own test Bobbin (socket `$APPLE2_BRIDGE_DIR/bobbin_bridge.sock`, default `/tmp`). The MCP server is for Claude Code; **the proxy never calls MCP tools.**
 
-### Why It Exists
-
-The proxy needs to control the emulator for testing code before deploying to real hardware.
-The MCP server is for Claude Code's interactive use - the proxy needs its own interface.
-
-**DO NOT** try to call MCP tools from the proxy. Use the emulator bridge instead.
-
-### How It Works
+The agent loop uses the **test harness**:
 
 ```python
-# In unified_proxy.py:
-from emulator_bridge import mcp_call as emulator_mcp_call
-
-proxy = UnifiedProxy(mcp_call=emulator_mcp_call)
+from emulator_bridge import get_bridge
+import deploy
+b = get_bridge()
+prog = deploy.build_basic(open('programs/TESTHGR.BAS').read(), 'TEST', has_aux=True)
+b.run_program(prog)      # builds a launch state file (program bytes, page-3 hooks,
+                         # BASIC pointers, guard patterns) and load_states it
+b.send_input("{RIGHT}{SPACE}")
+obs = b.observe()        # status, screen, mode, PNG image, hgr_page, problems
+b.shutdown()
 ```
 
-The bridge:
-1. Starts Bobbin with `--control-socket /tmp/bobbin.sock`
-2. Connects via `BobbinControlSocket`
-3. Translates MCP-style tool calls to control socket commands
-
-### Using the Bridge Directly
-
-```python
-from emulator_bridge import mcp_call, get_bridge
-
-# Boot emulator
-mcp_call('mcp__apple2-mcp__boot', {'machine': 'enhanced'})
-
-# Read screen
-screen = mcp_call('mcp__apple2-mcp__read_screen', {})
-
-# Tokenize and inject BASIC
-result = mcp_call('mcp__apple2-mcp__tokenize', {'source': '10 PRINT "HI"'})
-mcp_call('mcp__apple2-mcp__inject_tokenized_basic', {
-    'hex_data': result['hex'],
-    'auto_run': True
-})
-
-# Shutdown when done
-get_bridge().shutdown()
-```
-
-### Supported Tools
-
-| Tool | Description |
-|------|-------------|
-| `mcp__apple2-mcp__boot` | Start emulator |
-| `mcp__apple2-mcp__read_screen` | Get 40x24 text screen |
-| `mcp__apple2-mcp__type_text` | Type into emulator |
-| `mcp__apple2-mcp__run_basic` | Run BASIC command |
-| `mcp__apple2-mcp__tokenize` | Tokenize BASIC source |
-| `mcp__apple2-mcp__inject_tokenized_basic` | Inject program into memory |
-| `mcp__apple2-mcp__peek` | Read memory |
-| `mcp__apple2-mcp__poke` | Write memory |
-| `mcp__apple2-mcp__load_binary` | Load hex data |
-| `mcp__apple2-mcp__assemble` | Assemble 6502 code (requires ca65) |
-| `mcp__apple2-mcp__call` | Call machine code routine |
-| `mcp__apple2-mcp__get_registers` | Get CPU state |
-| `mcp__apple2-mcp__reset` | Reset emulator |
-| `mcp__apple2-mcp__save_state` | Save emulator state to file |
-| `mcp__apple2-mcp__load_state` | Load emulator state from file |
-| `mcp__apple2-mcp__proxy_start` | Start the proxy server |
-| `mcp__apple2-mcp__proxy_stop` | Stop the proxy server |
-| `mcp__apple2-mcp__proxy_status` | Get proxy status (running, PID) |
-| `mcp__apple2-mcp__proxy_log` | Get recent proxy log output |
+Gotchas learned the hard way:
+- Bobbin `--simple` sets **stdin O_NONBLOCK**. Never let it inherit someone else's stdin (it killed the MCP server once). The bridge gives it `stdin=PIPE`; `proxy_control` starts the proxy with `stdin=DEVNULL`.
+- Unix socket paths max out at 104 chars on macOS: keep `APPLE2_BRIDGE_DIR` short.
+- Never `cp` over a running/signed `bobbin` binary: macOS SIGKILLs it (exit 137). `rm` then `cp`.
+- `get_softswitches()` returns the inner dict already.
+- The harness runs Bobbin with **`--no-turbo`** (real 1 MHz): `--simple` is otherwise unthrottled (~40x), and Claude judges game speed from these runs.
+- `run_program` fills main and aux `$0800-$BEFF` with junk first: a real Apple II's memory is never clean, and programs that assume zeros must fail here.
 
 ## State Snapshots & Instant Environments
 
@@ -361,14 +288,22 @@ python3 tools/prodos.py list disks/agent_contiguous.dsk
 
 # Add a file to disk
 python3 tools/prodos.py add <disk> <local_file> <prodos_name> [type] [aux_addr]
-# Example: python3 tools/prodos.py add disks/agent.dsk build/AGENT.BIN AGENT.BIN BIN 6000
+# Example: python3 tools/prodos.py add disks/mydisk.dsk build/GAME.BIN GAME BIN 0800
 
 # Delete a file from disk
 python3 tools/prodos.py del <disk> <prodos_name>
 
-# Create fresh bootable agent disk (contiguous allocation)
-python3 tools/make_agent_disk.py [output.dsk] [--test]
+# Build the agent boot disk (what `make disk` runs)
+python3 tools/build_agent_disk.py [output.dsk] [--test]
 ```
+
+### The boot disk: copy a disk the real machine boots, never build from scratch
+
+**A real //e (enhanced, Floppy Emu) crashed at `2002-` on disks with the ProDOS 2.4 kernel** (`disks/ProDOS_2_4.dsk`, the first 2.4 release), even the stock 2.4 disk, and on disks built from scratch by `tools/make_agent_disk.py`. Bobbin boots all of them. The disk that boots it is the January one (ProDOS 1.9 + BASIC.SYSTEM, made with AppleCommander), so:
+
+- `disks/base_jan19.dsk` = that January disk with the old agent files deleted.
+- `tools/build_agent_disk.py` copies it and adds `AGENT.SYSTEM` with **AppleCommander** (`tools/ac.jar` or `$AC_JAR`), checks that AGENT.SYSTEM is the first `.SYSTEM` entry and reads back exactly, and boot-tests it.
+- `src/apple2_mcp/README.md` ("Disk Images - The Big Gotchas") says the same: never write ProDOS structures by hand. `make_agent_disk.py` / `make_diag_disk.py` still do (diag disk only).
 
 ### File Types
 
@@ -389,13 +324,22 @@ python3 tools/make_agent_disk.py [output.dsk] [--test]
 
 **Use `.dsk` files** - they work with hardware disk emulators and are the default.
 
+### Copying a disk to an SD card (Floppy Emu-style adapter)
+
+The adapter needs each image to be **one contiguous run of clusters** on the FAT card. A plain `cp` (or `rm` + `cp`) on macOS can fragment it; the adapter then says "file not contiguous", or may silently read the wrong clusters (the first real-hardware boot most likely got zeros for AGENT.SYSTEM that way). Always use:
+
+```bash
+python3 tools/copy_to_card.py disks/agent_contiguous.dsk "/Volumes/<card>/<folder>/Apple II Agent.dsk"
+sudo python3 tools/fat_check.py "/Volumes/<card>" "<folder>/Apple II Agent.dsk"   # sudo: the user runs this one
+```
+
+(`disks/agent_diag.dsk` is built from scratch with ProDOS 2.4 and crashes on the real machine.)
+
 ### Rebuilding Agent Disk
 
 ```bash
-# Full rebuild workflow
-make agent                              # Build AGENT.BIN
-python3 tools/make_agent_disk.py        # Create disks/agent_contiguous.dsk
-python3 tools/prodos.py list disks/agent_contiguous.dsk  # Verify
+make disk                               # AGENT.SYSTEM + disks/agent_contiguous.dsk
+python3 tools/prodos.py list disks/agent_contiguous.dsk  # PRODOS, AGENT.SYSTEM, BASIC.SYSTEM
 ```
 
 ### Tool Architecture
@@ -405,7 +349,8 @@ tools/prodos.py          # Unified CLI (delegates to below)
   ├── tools/prodos_add.py    # Add files (handles .dsk/.po format)
   └── tools/prodos_delete.py # Delete files, list catalog
 
-tools/make_agent_disk.py # Standalone: creates bootable disk with contiguous allocation
+tools/build_agent_disk.py # The agent boot disk: base_jan19.dsk + AppleCommander (make disk)
+tools/make_agent_disk.py # From scratch, ProDOS 2.4: crashes the real //e (diag disk only)
 tools/prodos_disk.py     # Reference library (not used by CLI)
 ```
 
@@ -413,98 +358,79 @@ tools/prodos_disk.py     # Reference library (not used by CLI)
 
 | File | Purpose |
 |------|---------|
-| `proxy/agentic_claude.py` | **THE AGENTIC LOOP** - tools and 20-turn iteration |
-| `proxy/emulator_bridge.py` | **EMULATOR BRIDGE** - connects agentic loop to Bobbin via control socket |
-| `proxy/unified_proxy.py` | Main proxy, calls agentic_claude when `/AGENT` enabled |
-| `proxy/basic_tokenizer_streaming.py` | Tokenizes BASIC for injection |
-| `asm/agent.s` | Apple II client (6502 assembly) |
+| `proxy/agentic_claude.py` | **THE AGENT LOOP** - system prompt, tools, streaming display, previews |
+| `proxy/deploy.py` | **Program building + memory layout** (BASIC around HGR pages, ca65 binaries, RUN descriptor) - shared by test harness and real deploys |
+| `proxy/emulator_bridge.py` | **Test harness** - launches programs like the real Apple II, observes, screenshots |
+| `proxy/unified_proxy.py` | Proxy: sessions, commands, DEPLOY/LOAD/RUN/SHOW senders |
+| `proxy/a2p_protocol.py` | Wire protocol |
+| `asm/agent.s` | Apple II client: UI, TCP, packets |
+| `asm/agent_deploy.s` | **Deploy/launch/return**: LOAD staging, READY prompt, EXCHANGE blob, page-3 hooks, reentry |
+| `asm/agent_screen.s` | The agent's screen routines (`vid80_out`, `clear_eol`, `clear_screen`, `read_key`, `text40`): 80 columns without the firmware. Agent UI code calls these, never `CLREOL`/`HOME`/`RDKEY` directly. NB `VTAB` in agent.s is the ROM's TABV: it sets CV from A |
+| `asm/agent_sysload.s`, `asm/agent_sys.cfg` | AGENT.SYSTEM loader ($2000 -> $6000) |
+| `programs/` | Claude's workspace; `programs/history/` = every deployed version |
 | `src/apple2_mcp/` | MCP server for emulator control (used by Claude Code) |
-| `src/apple2_mcp/control_socket.py` | **Control socket client** - USE THIS for emulator control |
-| `tools/make_agent_disk.py` | **Creates contiguous disk images** - uses ProDOS 2.4 boot blocks |
-| `tools/prodos_disk.py` | ProDOS disk manipulation (catalog, add, extract) |
-| `tools/create_snapshots.py` | **Creates environment snapshots** - BASIC and ProDOS states |
-| `states/` | Pre-baked environment snapshots for instant loading |
-| `bobbin_socket.md` | Control socket design document |
-| `library/` | **6502/Apple II reference library** - instruction set, ca65, ld65, ProDOS MLI, soft switches, memory map, ROM routines |
+| `tools/build_agent_disk.py` | The boot disk: `disks/base_jan19.dsk` (ProDOS 1.9) + AGENT.SYSTEM via AppleCommander |
+| `library/` | 6502/Apple II reference library |
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `/EXIT` | **Drop to BASIC to run your program** (or `/SUSPEND`) |
-| `/AGENT` | Toggle agentic mode OFF (it's ON by default) |
-| `/CLEAR` | Clear conversation history |
-| `/MODEL S/O/H` | Set model (Sonnet/Opus/Haiku) |
-| `/IP` | Show proxy IP |
-| `/SETIP x.x.x.x` | Set proxy IP address |
-| `/PORT xxxx` | Set proxy port (default: 8080) |
-| `/HELP` | Show commands |
+Handled on the Apple II: `/RUN`, `/EXIT` (`/SUSPEND`, `/QUIT`), `/SETIP`, `/PORT`, `/IP`, `/SAVE`, `/LIST`, `/CODE`, `/CLEAR` (screen), `/MORE`, `/DISPLAY` and `/MODEL` (also forwarded), `/RESET` (forwarded). Matching is whole-word; **anything else goes to the proxy**: `/HELP`, `/UNDO`, `/VERSIONS`, `/SEND <FILE>`, `/EFFORT`, `/LIMIT`, `/PROMPT`, `/AGENT`, `/CHAT`.
 
-### Workflow: Running Generated Code
+Sent by the Apple II itself: `/STOP` (ESC while waiting; a second ESC stops waiting) and `/RERUN` (`/RUN` of machine code that reaches `$6000`+, or any RESIDENT machine code: a fresh copy, run on arrival). ESC at `AGENT>` clears the line. `/EXIT` leaves a plain `]` prompt; ESC there, `&` and Ctrl-Y all land on RETURN_ENTRY.
+
+### Workflow
 
 ```
-1. AGENT> make a hello world     → Code generated and injected
-2. AGENT> /EXIT                  → Drops to BASIC ]
-3. ] RUN                         → Program runs!
-4. ] &                           → Returns to AGENT> (or Ctrl-Y)
-5. AGENT>                        → Ready for next request
+AGENT> make a hello world      -> Claude writes, tests, deploys
+*** HELLO IS READY! ***         -> RETURN runs it (typing anything else = keep chatting)
+(program runs; ESC / Ctrl-Reset)
+WELCOME BACK!                   -> /RUN plays again, or ask for changes
 ```
 
 ## A2P Protocol
 
 | Type | Name | Description |
 |------|------|-------------|
-| 0x00 | INIT | Initialize connection |
+| 0x00 | INIT | caps (CAP_80_COL 1, CAP_AUX_RAM 8, CAP_DEPLOY $10), model, display, version (2) |
 | 0x01 | CHAT | User message |
-| 0x02 | RESP | AI response (streaming) |
-| 0x03 | CODE | BASIC code chunk (tokenized) |
-| 0x04 | STATUS | Status message |
+| 0x02 | RESP | Text for the log (flag 1 = final) |
+| 0x03 | CODE | BASIC at $0801 (legacy clients only) |
+| 0x04 | STATUS | Status line; `DONE` ends a response |
 | 0x05 | ACK | Acknowledgment |
+| 0x07 | LOAD | addr(2) + up to 126 bytes |
+| 0x08 | DEPLOY | mode (0 main, 1 aux) + purpose (0 program, 1 preview) |
+| 0x09 | RUN | descriptor: kind, start, prgend, lomem, himem, mode, lo/hi page, name |
+| 0x0A | SHOW | 0 text, 1 HGR preview |
 
 ## Build
 
 ```bash
-make agent              # Build AGENT.BIN
-make install-agent      # Install to agent.dsk
+make agent              # build/AGENT.SYSTEM (and AGENT.BIN, which is now too big to BRUN)
+make disk               # ...and a fresh disks/agent_contiguous.dsk
 ```
 
-## Current Status
+## Testing
 
-Working:
-- TCP connection via Uthernet II
-- A2P protocol with reliable packet delivery
-- Claude API integration with streaming
-- Text display on Apple II (40-column)
-- Agentic mode with tools (proxy-side) ✅
-- **Emulator bridge** - proxy can boot, inject, run, test code ✅
-- `/CODE` command - generates and injects BASIC code ✅
-- Code tokenization and memory injection ✅
-- Control socket integration ✅
-- **State save/load** - 128KB (main + aux) snapshots ✅
-- **Instant environments** - load_basic_env, load_prodos_env, load_dos33_env all working (auto-boot) ✅
-- **Multi-client socket** - up to 16 simultaneous connections ✅
-- **Disk tools** - `prodos.py` list/add/del and `make_agent_disk.py` work correctly ✅
-- **Proxy control via MCP** - `proxy_start`, `proxy_stop`, `proxy_status`, `proxy_log` tools ✅
+```bash
+tests/run_all.sh                 # all no-API tests, one after another (~15 min)
+tests/run_all.sh --real-speed    # + e2e at a real 1 MHz
+.venv/bin/python tests/live_agent.py "<request>" --start-proxy --out <dir>   # one real Claude request
+BOBBIN_U2_RESET_ON_RESET=1 .venv/bin/python tests/e2e_agent.py           # Uthernet resets with Ctrl-Reset
+```
 
-Needs testing:
-- End-to-end with real Apple II hardware
-- Full agentic workflow (user request → emulator test → deploy)
-- **Proxy MCP tools** - restart MCP server to load new tools, then test `proxy_start`/`proxy_stop`
-- **Agent network connection** - agent connects to proxy at configured IP, test with `/SETIP`
+- **Each test has its own discovery channel**: its Bobbin gets `BOBBIN_U2_UDP_PORT=<port+10000>` (Bobbin sends the virtual network's UDP there instead of 6502) and its proxy `APPLE2_DISCOVERY_PORT=<port+10000>`. Without that, a test's Apple II found the everyday proxy on 6502 (it happened). Ports: e2e/soak 6599, setup 6598, display 6597, live 6596; the everyday proxy is 6502. Still run them one at a time (they share `/tmp` work dirs).
+- Test proxies use `APPLE2_PROXY_CONTROL_DIR` so they never touch `/tmp/claude/proxy.pid` (the everyday proxy's).
+- Bobbin's virtual network behaves like a real host (536-byte segments, the Apple's window, resends, duplicate drops) - it caught an ACK bug the old one hid. If something passes only with small segments, it's broken.
+- `BOBBIN_U2_CORRUPT_EVERY=n` garbles one byte of every nth virtual TCP segment, as a flaky bus on the real //e did (IP65 didn't check TCP checksums: the first real deploy stalled and lost a packet). `run_all.sh` runs e2e with n=5.
+- Test disks write a 10-byte `CLAUDECONF` with the stall watchdog **off** (byte 10 = 0): Bobbin runs unthrottled, so 20 emulated seconds pass in half a real one. `e2e_display.py` tests the watchdog on its own (2 s).
 
-Known issues:
-- **Agent default IP** - defaults to 192.168.64.1, use `/SETIP 192.168.65.1` for Bobbin emulator
+## Current Status (2026-10-23)
 
-## Working Features (Jan 31, 2026)
+All automated tests pass (display, first-run setup, e2e at turbo and real speed, with and without a Uthernet reset on Ctrl-Reset, 25-cycle soak). Live Claude runs: times table, hi-res breakout (machine code), lo-res snake (machine code), Applesoft hi-res sketch, ESC-to-stop + follow-up request. 80 columns works (the agent draws it itself, `asm/agent_screen.s`; programs start in 40 and the agent comes back in 80).
 
-- **Code injection works!** - ask for any program, code is tokenized and injected
-- **`/EXIT` command** - drops to BASIC so you can `RUN` your program (also `/SUSPEND`)
-- **Return hooks** - type `&` or press Ctrl-Y at BASIC prompt to return to agent
-- **Double-response bug fixed** - no more connection resets after code injection
-- **TCP connection reuse fixed** - multiple requests now work (Bobbin virtual bridge fix)
-- **Disk format auto-detection** - `save_basic_to_disk` works with both ProDOS and DOS 3.3
-- **Web search** - Anthropic native web search tool for looking up Apple II info
-- **Disk save tools** - `disk_save_basic`, `disk_save_binary`, `disk_save_text` in agentic mode
+Real hardware (2026-10-23): **the agent boots on a real enhanced //e (Floppy Emu, Uthernet II), finds the proxy and chats with Claude.** Every earlier disk crashed at `2002-`: they all had the ProDOS 2.4 kernel (the stock 2.4 disk crashes too). The disk is now built from a January ProDOS 1.9 disk (see "The boot disk" above). Not yet tried on the real machine: a deploy and a program run, 80 columns.
+
+Port: **6502** everywhere (8080 is often taken).
 
 ## Avoiding Token Waste
 
@@ -523,18 +449,17 @@ Every token through the API costs money and latency. These patterns avoid passin
 
 ## NEVER FORGET
 
-1. **USE THE CONTROL SOCKET** - `BobbinControlSocket` is the reliable way to control the emulator
-2. **PROXY USES EMULATOR BRIDGE** - `proxy/emulator_bridge.py` connects agentic loop to Bobbin (DO NOT reinvent this!)
-3. **Agentic mode is ON by default** - `/AGENT` toggles it OFF for simple chat
-4. **Progress streams to Apple II** - user watches Claude work in real-time
-5. **agentic_claude.py has the loop** - 20 turns of tool use
-6. **Test in emulator first** - then deploy to real hardware
-7. **The mission is autonomous coding** - not just chat
-8. **/CODE command WORKS** - use it while agentic mode injection is broken
-9. **Control socket has EVERYTHING** - peek, poke, step, breakpoints, graphics capture, state save/load
-10. **MULTI-CLIENT SOCKET** - up to 16 agents can connect simultaneously for parallel work
-11. **INSTANT ENVIRONMENTS** - `load_basic_env`, `load_prodos_env`, `load_dos33_env` auto-boot + load state in one call
-12. **DISK TOOLS WORK** - `python3 tools/prodos.py list/add/del` and `make_agent_disk.py` are fully functional
-13. **PROXY VIA MCP** - use `proxy_start`/`proxy_stop`/`proxy_status`/`proxy_log` MCP tools instead of shell commands
-14. **SET AGENT IP** - use `/SETIP x.x.x.x` on Apple II to configure proxy IP (default 192.168.64.1 rarely works)
-15. **DON'T WASTE TOKENS** - use `source=` not `hex_data=`, use `load_file` not `load_binary` for data files, never stream hex through the API
+1. **USE THE CONTROL SOCKET** - `BobbinControlSocket` is the reliable way to control an emulator
+2. **THE PROXY USES ITS OWN TEST BOBBIN** via `emulator_bridge.py`, never MCP tools
+3. **deploy.py IS THE SINGLE SOURCE OF TRUTH** for memory layout; the test harness and real deploys must launch identically
+4. **agent_deploy.s and deploy.py must agree** on the RUN descriptor, page-3 addresses and modes
+5. **Progress streams to the Apple II** - the user watches Claude work, so keep the loop chatty
+6. **Every program must exit with ESC** (BASIC `TEXT : HOME : &`, machine code RTS / `JMP $03D0`)
+7. **Page 3 $03C7-$03FF belongs to the agent**; programs get $0300-$03C6
+8. **Agentic mode is ON by default** - `/AGENT` toggles it off
+9. **PROXY VIA MCP** - `proxy_start(port=6502)` etc.; the proxy hops into `.venv` by itself
+10. **Bobbin fixes go to the canonical Bobbin source**, then rebuild and `rm` + `cp` the binary into `bobbin/src/bobbin`
+11. **DON'T WASTE TOKENS** - MCP: use `source=` not `hex_data=`, `load_file` not `load_binary`
+12. **TESTS RUN ONE AT A TIME** - `tests/run_all.sh`; each has its own discovery port (`BOBBIN_U2_UDP_PORT`/`APPLE2_DISCOVERY_PORT`), never the everyday 6502
+13. **SD CARD: `tools/copy_to_card.py`**, never plain `cp` - the adapter needs contiguous files
+14. **BOOT DISK = `make disk`** (`base_jan19.dsk` + AppleCommander). Never build ProDOS disks from scratch; ProDOS 2.4 crashed a real //e
