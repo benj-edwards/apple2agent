@@ -23,6 +23,10 @@ CLAUDE_BIN = $(BUILD_DIR)/CLAUDE.CODE
 AGENT_SRC = $(ASM_DIR)/agent.s
 AGENT_OBJ = $(BUILD_DIR)/agent.o
 AGENT_BIN = $(BUILD_DIR)/AGENT.BIN
+AGENT_SYS = $(BUILD_DIR)/AGENT.SYSTEM
+SYSLOAD_SRC = $(ASM_DIR)/agent_sysload.s
+SYSLOAD_OBJ = $(BUILD_DIR)/agent_sysload.o
+SYS_CONFIG = $(ASM_DIR)/agent_sys.cfg
 
 CONFIG = $(ASM_DIR)/agent.cfg
 DISK = $(DISKS_DIR)/agent.dsk
@@ -40,7 +44,7 @@ all: $(REMOTE_BIN) $(CLAUDE_BIN) $(AGENT_BIN)
 # Assemble
 $(REMOTE_OBJ): $(REMOTE_SRC)
 	@mkdir -p $(BUILD_DIR)
-	$(CA65) --cpu 6502 -I $(LIBS_DIR)/inc -o $@ $<
+	$(CA65) --cpu 6502 -I $(LIBS_DIR)/inc -I $(ASM_DIR) -o $@ $<
 
 # Link (loads at $6000, no header)
 $(REMOTE_BIN): $(REMOTE_OBJ) $(CONFIG)
@@ -52,7 +56,7 @@ $(REMOTE_BIN): $(REMOTE_OBJ) $(CONFIG)
 # Assemble Claude Code
 $(CLAUDE_OBJ): $(CLAUDE_SRC)
 	@mkdir -p $(BUILD_DIR)
-	$(CA65) --cpu 6502 -I $(LIBS_DIR)/inc -o $@ $<
+	$(CA65) --cpu 6502 -I $(LIBS_DIR)/inc -I $(ASM_DIR) -o $@ $<
 
 # Link Claude Code
 $(CLAUDE_BIN): $(CLAUDE_OBJ) $(CONFIG)
@@ -62,9 +66,9 @@ $(CLAUDE_BIN): $(CLAUDE_OBJ) $(CONFIG)
 		apple2.lib
 
 # Assemble Agent (A2P Protocol)
-$(AGENT_OBJ): $(AGENT_SRC)
+$(AGENT_OBJ): $(AGENT_SRC) $(ASM_DIR)/agent_deploy.s $(ASM_DIR)/agent_screen.s
 	@mkdir -p $(BUILD_DIR)
-	$(CA65) --cpu 6502 -I $(LIBS_DIR)/inc -o $@ $<
+	$(CA65) --cpu 6502 -I $(LIBS_DIR)/inc -I $(ASM_DIR) -o $@ $<
 
 # Link Agent
 $(AGENT_BIN): $(AGENT_OBJ) $(CONFIG)
@@ -73,8 +77,24 @@ $(AGENT_BIN): $(AGENT_OBJ) $(CONFIG)
 		$(LIBS_DIR)/drivers/a2uther2.lib \
 		apple2.lib
 
+# AGENT.SYSTEM: what the boot disk runs (ProDOS loads it at $2000, the
+# loader moves the agent to $6000)
+$(SYSLOAD_OBJ): $(SYSLOAD_SRC)
+	@mkdir -p $(BUILD_DIR)
+	$(CA65) --cpu 6502 -o $@ $<
+
+$(AGENT_SYS): $(AGENT_OBJ) $(SYSLOAD_OBJ) $(SYS_CONFIG)
+	$(LD65) -C $(SYS_CONFIG) -o $@ $(SYSLOAD_OBJ) $(AGENT_OBJ) \
+		$(LIBS_DIR)/ip65_tcp.lib \
+		$(LIBS_DIR)/drivers/a2uther2.lib \
+		apple2.lib
+
 # Build only the unified agent
-agent: $(AGENT_BIN)
+agent: $(AGENT_BIN) $(AGENT_SYS)
+
+# Build the agent and its boot disk (from a ProDOS 1.9 disk that boots a real //e)
+disk: agent
+	$(PYTHON) $(TOOLS_DIR)/build_agent_disk.py --test
 
 # Install to production disk
 install: $(REMOTE_BIN)
@@ -131,4 +151,4 @@ install-claude: $(CLAUDE_BIN)
 test:
 	cd tests && $(PYTHON) -c "from test_protocol import *; import unittest; unittest.main(module='test_protocol', exit=False)" 2>/dev/null || $(PYTHON) test_protocol.py
 
-.PHONY: all agent install install-test install-agent install-agent-test clean catalog catalog-test proxy agentic stream-proxy unified-proxy unified-proxy-test install-claude test
+.PHONY: all agent disk install install-test install-agent install-agent-test clean catalog catalog-test proxy agentic stream-proxy unified-proxy unified-proxy-test install-claude test

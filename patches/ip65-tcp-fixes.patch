@@ -1,0 +1,110 @@
+diff --git a/ip65/tcp.s b/ip65/tcp.s
+index 7e306c3..63f77c6 100644
+--- a/ip65/tcp.s
++++ b/ip65/tcp.s
+@@ -73,6 +73,7 @@ tcp_cxn_state_syn_sent    = 2   ; (waiting for an inbound SYN/ACK)
+ tcp_cxn_state_established = 3
+ 
+ ; tcp packet offsets
++tcp_ip_ttl = 8                  ; offset of the IP header's ttl (start of the 12 bytes before tcp_inp)
+ tcp_inp  = ip_inp  + ip_data    ; pointer to tcp packet inside inbound ethernet frame
+ tcp_outp = ip_outp + ip_data    ; pointer to tcp packet inside outbound ethernet frame
+ tcp_src_port       =  0         ; offset of source port field in tcp packet
+@@ -133,6 +134,8 @@ tcp_connect_ip:                         .res 4  ; ip address of remote server to
+ 
+ tcp_timer:              .res 1
+ tcp_loop_count:         .res 1
++tcp_cksum_save:         .res 4  ; ttl, proto, ip header checksum while the pseudo header sits there
++tcp_cksum_result:       .res 2
+ tcp_packet_sent_count:  .res 1
+ 
+ 
+@@ -412,10 +415,11 @@ tcp_send:
+   sta ip65_error
+   sec
+   rts
+-  lda #0                        ; reset the "packet sent" counter
+-  sta tcp_packet_sent_count
+ 
+ @connection_established:
++  lda #0                        ; reset the "packet sent" counter (apple2agent:
++  sta tcp_packet_sent_count     ; it sat after the rts above and never ran, so
++                                ; resends piled up over a connection's life)
+   ; increment the expected sequence number
+   ldax #tcp_connect_expected_ack_number
+   stax acc32
+@@ -462,6 +466,9 @@ tcp_send:
+   sta tcp_state
+   rts
+ @no_abort:
++  lda tcp_state                 ; apple2agent: the other end closed or reset
++  cmp #tcp_cxn_state_established ; the connection - no ACK is coming
++  bne @failed
+   ldax #tcp_connect_last_ack
+   stax acc32
+   ldax #tcp_connect_expected_ack_number
+@@ -657,6 +664,46 @@ check_current_connection:
+   clc
+   rts
+ 
++; checksum the inbound segment with its pseudo header: Z set if it's intact.
++; The pseudo header (zero, protocol, TCP length, source, destination) goes in
++; the 12 bytes just before the TCP header - the IP header's ttl, protocol and
++; checksum (saved and put back), then its source and destination addresses.
++tcp_verify_checksum:
++  ldx #3
++: lda ip_inp+tcp_ip_ttl,x
++  sta tcp_cksum_save,x
++  dex
++  bpl :-
++  lda #0
++  sta ip_inp+tcp_ip_ttl             ; zero, then the protocol byte stays (6)
++  sec                           ; TCP length = IP length - 20, big-endian
++  lda ip_inp+ip_len+1
++  sbc #ip_data
++  sta ip_inp+tcp_ip_ttl+3
++  lda ip_inp+ip_len
++  sbc #0
++  sta ip_inp+tcp_ip_ttl+2
++  ldax #ip_inp+tcp_ip_ttl
++  stax ip_cksum_ptr
++  lda ip_inp+tcp_ip_ttl+3           ; checksum 12 + TCP length bytes
++  clc
++  adc #12
++  tay
++  lda ip_inp+tcp_ip_ttl+2
++  adc #0
++  tax
++  tya
++  jsr ip_calc_cksum             ; complemented sum: 0 when intact
++  stax tcp_cksum_result
++  ldx #3
++: lda tcp_cksum_save,x
++  sta ip_inp+tcp_ip_ttl,x
++  dex
++  bpl :-
++  lda tcp_cksum_result
++  ora tcp_cksum_result+1
++  rts
++
+ ; process incoming tcp packet
+ ; called automatically by ip_process if "ip.s" was compiled with -DTCP
+ ; inputs:
+@@ -665,7 +712,16 @@ check_current_connection:
+ ; none but if connection was found, an outbound message may be created, overwriting eth_outp
+ ; also tcp_state and other tcp variables may be modified
+ tcp_process:
+-  lda #tcp_flag_RST
++  ; Verify the TCP checksum first. Only the IP header used to be checked, so a
++  ; byte garbled between the Uthernet and the CPU reached the application - or,
++  ; in the header length, moved the ACK point past what the peer had sent,
++  ; which stalls the connection for good (the peer ignores an ACK beyond what
++  ; it sent; we refuse its resends as old). A bad segment is dropped without an
++  ; ACK, and the peer sends it again.
++  jsr tcp_verify_checksum
++  beq :+
++  rts
++: lda #tcp_flag_RST
+   bit tcp_inp+tcp_flags_field
+   beq @not_reset
+   jsr check_current_connection

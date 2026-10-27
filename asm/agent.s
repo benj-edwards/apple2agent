@@ -36,7 +36,7 @@
 
 .export start
 
-.import exit_to_basic
+.import __BSS_RUN__, __BSS_SIZE__
 .import print_a
 .import get_key
 .import ip65_process
@@ -48,8 +48,22 @@
 .import tcp_send_data_len
 .import tcp_inbound_data_ptr
 .import tcp_inbound_data_length
+.import tcp_state
 .import print_cr
 .importzp copy_src
+; UDP, for finding the proxy (find_proxy)
+.import udp_add_listener
+.import udp_remove_listener
+.import udp_callback
+.import udp_send
+.import udp_send_dest
+.import udp_send_src_port
+.import udp_send_dest_port
+.import udp_send_len
+.import udp_inp
+.import ip_inp
+.importzp udp_data
+.importzp ip_src
 
 ;-------------------------------------------------------------------------------
 ; A2P Protocol Constants
@@ -76,16 +90,8 @@ CAP_MOUSE       = $04           ; Has mouse card
 ; Response flags (in RESP packet)
 RESP_FLAG_FINAL = $01           ; This is the final chunk
 
-;-------------------------------------------------------------------------------
-; Memory Layout
-; NOTE: These addresses must be ABOVE the BSS segment end (~$9D40)
-; to avoid collision with IP65's ethernet buffers
-;-------------------------------------------------------------------------------
-SCREEN_SAVE     = $A600         ; 1KB screen save buffer ($A600-$A9FF)
-                                ; (must be past IOBUF which ends at $A5FF)
-RECV_BUFFER     = $AA00         ; 4KB receive buffer (circular) ($AA00-$B9FF)
-RECV_BUF_SIZE   = $1000         ; 4096 bytes
-RECV_BUF_MASK   = $0FFF         ; Mask for wrap-around
+TCP_ESTABLISHED = 3             ; IP65 tcp_state when connected
+DEFAULT_PORT    = 6502          ; Proxy port
 
 ; Configuration at $0300
 CONFIG_BASE     = $0300
@@ -94,6 +100,8 @@ CONFIG_PORT     = $0304         ; 2 bytes: port (little-endian)
 CONFIG_MODEL    = $0306         ; 1 byte: AI model (0=sonnet, 1=opus, 2=haiku)
 CONFIG_MAGIC    = $0307         ; 1 byte: magic ($A2 = valid config)
 CONFIG_DISPLAY   = $0308         ; 1 byte: display mode (0=40U, 1=40L, 2=80)
+CONFIG_WATCHDOG  = $0309         ; 1 byte: stall watchdog seconds, 0 = off (9-byte files: 20)
+DEFAULT_WATCHDOG = 20
 CONFIG_MAGIC_VAL = $A2
 
 ; Display mode constants
@@ -171,6 +179,9 @@ CV              = $25           ; Vertical cursor position
 ; Soft switches
 KBD             = $C000         ; Keyboard data
 KBDSTRB         = $C010         ; Keyboard strobe
+BELL1           = $FBDD         ; Beep the speaker (no COUT)
+WAIT            = $FCA8         ; Monitor delay: (26 + 27A + 5A*A) / 2 cycles
+RDVBLBAR        = $C019         ; bit 7 low during vertical blank (//e)
 TXTPAGE1        = $C054         ; Display page 1
 TXTPAGE2        = $C055         ; Display page 2
 STORE80OFF      = $C000         ; 80-col store off
@@ -198,7 +209,7 @@ MLI_SET_EOF     = $D0           ; Set end of file
 FT_BIN          = $06           ; Binary file
 
 ; Config file size (9 bytes: IP + Port + Model + Magic + Display)
-CONFIG_SIZE     = 9
+CONFIG_SIZE     = 10
 
 ;-------------------------------------------------------------------------------
 ; Zero Page Variables (using safe locations not used by IP65)
@@ -223,14 +234,44 @@ scroll_cnt      = $ED           ; Scroll counter
 ; Entry Point
 ;===============================================================================
 start:
+        ; Fresh variables (nothing zeroes BSS for us)
+        lda #<__BSS_RUN__
+        sta dst_ptr
+        lda #>__BSS_RUN__
+        sta dst_ptr+1
+        ldx #>__BSS_SIZE__
+        ldy #0
+        tya
+@clear_page:
+        cpx #0
+        beq @clear_tail
+@clear_byte:
+        sta (dst_ptr),y
+        iny
+        bne @clear_byte
+        inc dst_ptr+1
+        dex
+        bne @clear_page
+@clear_tail:
+        cpy #<__BSS_SIZE__
+        beq @cleared
+        sta (dst_ptr),y
+        iny
+        bne @clear_tail
+@cleared:
+
         ; Print banner first
-        jsr HOME
+        jsr clear_screen
         ldax #msg_banner
         jsr print
         jsr print_cr
 
         ; Load saved configuration FIRST (before display mode)
         jsr load_config
+        jsr save_config_shadow
+        jsr detect_aux_ram
+        jsr init_applesoft      ; no BASIC.SYSTEM ran Applesoft's cold start
+        jsr init_basic_program
 
         ; Apply display mode from config
         lda CONFIG_DISPLAY
@@ -241,6 +282,10 @@ start:
 @display_ok:
         sta display_mode
         jsr apply_display_mode
+        jsr clear_screen        ; the banner again, in the chosen mode
+        ldax #msg_banner
+        jsr print
+        jsr print_cr
 
         ; Show display mode
         lda display_mode
@@ -260,26 +305,57 @@ start:
         jsr print_cr
 
         ; Initialize network
+@init_net:
         ldax #msg_init_net
         jsr print
         init_ip_via_dhcp
         bcc @net_ok
 
+        ; A real Uthernet's link can take a few seconds to come up after
+        ; power-on, so DHCP may fail at first: retry by itself
         ldax #msg_net_fail
         jsr print
         jsr print_cr
-        jmp exit_to_basic
+        ldax #msg_net_retry
+        jsr print
+        lda #50                 ; ~5 seconds, or a key
+        jsr wait_key_or_timeout
+        jsr print_cr
+        jmp @init_net
 
 @net_ok:
         jsr print_cr
-        jsr print_ip_config
+        ldax #msg_my_address
+        jsr print
+        ldax #cfg_ip
+        jsr print_dotted_quad
         jsr print_cr
 
         ; Install ampersand hook
         jsr install_hook
+        ; Ctrl-Reset, BRK and $03D0 all lead back to the agent from now on
+        jsr install_resident_hooks
 
-        ; Connect to proxy now
+        ; Where is the proxy? Ask the network first; fall back to the
+        ; saved (or default) address
         jsr print_cr
+        ldax #msg_finding
+        jsr print
+        jsr find_proxy
+        bcs @not_found
+        ldax #msg_found
+        jsr print
+        jsr print_proxy_address
+        jsr print_cr
+        jsr save_if_moved       ; remember it for next time
+        jmp @connect
+@not_found:
+        ldax #msg_not_found
+        jsr print
+        jsr print_proxy_address
+        jsr print_cr
+
+@connect:
         ldax #msg_connecting
         jsr print
         jsr connect_to_proxy
@@ -288,30 +364,33 @@ start:
         ldax #msg_connected_proxy
         jsr print
         jsr print_cr
-        jmp @show_instructions
+        ldax #msg_installed
+        jsr print
+        jsr print_cr
+        lda #20                 ; a moment to read it, then straight in
+        jsr wait_key_or_timeout
+        jmp @ui
 
 @conn_failed:
         ldax #msg_conn_fail
         jsr print
         jsr print_cr
-
-@show_instructions:
-        ; Show instructions
-        ldax #msg_installed
+        ldax #msg_start_proxy
         jsr print
         jsr print_cr
 
         ; Wait for key so user can see boot info
         ldax #msg_press_key
         jsr print
-        jsr RDKEY           ; Wait for any key
+        jsr read_key           ; Wait for any key
+@ui:
         jsr print_cr        ; Line break before UI
 
         ; Go directly to main UI
         jsr main_ui
 
-        ; Return to BASIC when done
-        jmp exit_to_basic
+        ; Return to BASIC when done ($03D0 now leads back to the agent)
+        jmp cmd_suspend
 
 ;-------------------------------------------------------------------------------
 ; Detect 80-column card
@@ -332,7 +411,18 @@ detect_80col:
 ; Input: display_mode must be set (0=40U, 1=40L, 2=80)
 ;-------------------------------------------------------------------------------
 apply_display_mode:
+        ; 80 columns needs an 80-column card (ProDOS MACHID bit 1); without
+        ; one it's 40 columns, mixed case
         lda display_mode
+        cmp #DISPLAY_80
+        bne :+
+        lda MACHID
+        and #$02
+        bne :+
+        lda #DISPLAY_40L
+        sta display_mode
+        sta CONFIG_DISPLAY
+:       lda display_mode
         cmp #DISPLAY_80
         beq @mode_80
         cmp #DISPLAY_40L
@@ -367,10 +457,16 @@ apply_display_mode:
         sta col_mode
         rts
 @mode_80:
-        ; Set 80-col via soft switches (don't call $C300 firmware - may not exist)
+        ; 80 columns with our own output (agent_screen.s), not the $C300
+        ; firmware: COUT goes to vid80_out, which writes aux and main
         sta SET80VID            ; Enable 80-col display
-        sta STORE80ON           ; Enable 80-col memory mapping
+        sta STORE80ON           ; PAGE2 selects aux memory for $0400-$07FF
         sta SETALTCHAR          ; Enable lowercase
+        sta TXTPAGE1
+        lda #<vid80_out
+        sta $36                 ; CSWL
+        lda #>vid80_out
+        sta $37                 ; CSWH
         lda #79
         sta screen_width_m1
         lda #CAP_80_COL
@@ -381,204 +477,13 @@ apply_display_mode:
 ; Install ampersand hook
 ;-------------------------------------------------------------------------------
 install_hook:
-        lda #$4C              ; JMP opcode
+        lda #$4C              ; & -> JMP RETURN_ENTRY: back to the agent
         sta AMPER_VECTOR
-        lda #<ampersand_entry
+        lda #<RETURN_ENTRY
         sta AMPER_VECTOR+1
-        lda #>ampersand_entry
+        lda #>RETURN_ENTRY
         sta AMPER_VECTOR+2
         rts
-
-;-------------------------------------------------------------------------------
-; Ampersand entry point
-;-------------------------------------------------------------------------------
-ampersand_entry:
-        lda in_ui
-        beq @not_in_ui
-        rts                     ; Already in UI, exit
-@not_in_ui:
-        ; Phase 2b: Check if this was auto-triggered by error intercept
-        ; (KSWL hook stuffed & after an immediate-mode error)
-        lda error_intercept_flag
-        beq @not_intercepted
-
-        ; Error was intercepted! Use saved input buffer
-        jsr copy_saved_input
-        lda #0
-        sta error_intercept_flag
-        sta kbd_stuff_state
-
-        ; If input is empty, skip to normal UI
-        lda input_len
-        bne @send_intercepted
-        jmp @normal_ui
-
-@send_intercepted:
-        ; Intercepted natural language! Enter UI and send to Claude
-        lda #1
-        sta in_ui
-        jsr save_screen
-
-        jsr HOME
-
-        ; Initialize output tracking
-        lda #OUTPUT_START
-        sta output_row
-        lda #0
-        sta output_col
-        sta lines_since_pause
-        lda #1
-        sta more_enabled         ; [MORE] pagination on by default
-
-        ; Print header
-        ldax #ui_header
-        jsr print
-        jsr print_cr
-
-        ; Show what we're sending
-        ldax #msg_nl_sending
-        jsr print
-        jsr print_cr
-        ldax #input_buffer
-        jsr print
-        jsr print_cr
-        jsr print_cr
-
-        ; Send the message to Claude
-        jsr send_chat
-
-        ; Clear input for next interaction
-        lda #0
-        sta input_len
-
-        ; Wait for keypress before returning to BASIC
-        jsr print_cr
-        ldax #msg_press_key
-        jsr print
-        jsr RDKEY
-
-        ; Restore screen and return to BASIC
-        jsr restore_screen
-        lda #0
-        sta in_ui
-        rts
-
-@not_intercepted:
-        ; Phase 3: Check if auto-triggered by program error
-        lda program_error_flag
-        beq @not_program_error
-        lda #0
-        sta program_error_flag
-        sta kbd_stuff_state
-        ; Reuse Phase 1 screen scan to read the error message
-        jsr check_basic_error
-        lda input_len
-        beq @normal_ui
-        ; Found error on screen - send to Claude (reuse Phase 1 path)
-        jmp @error_send
-
-@not_program_error:
-        ; Phase 1: Manual & press - check for BASIC errors
-        jsr check_basic_error
-
-        ; If error was detected (input_len > 0), send it immediately
-        lda input_len
-        beq @normal_ui
-
-@error_send:
-        ; Error detected! Send it to agent automatically
-        lda #1
-        sta in_ui
-        jsr save_screen
-
-        ; Set up the UI
-        jsr HOME
-
-        ; Initialize output tracking
-        lda #OUTPUT_START
-        sta output_row
-        lda #0
-        sta output_col
-        sta lines_since_pause
-
-        ; Print header
-        ldax #ui_header
-        jsr print
-        jsr print_cr
-
-        ; Show what error we detected
-        ldax #msg_error_detected
-        jsr print
-        jsr print_cr
-
-        ; Show the error message we're sending
-        ldax #input_buffer
-        jsr print
-        jsr print_cr
-        jsr print_cr
-
-        ; Send the error to agent (this will display response)
-        jsr send_chat
-
-        ; Clear input for next interaction
-        lda #0
-        sta input_len
-
-        ; Now go to normal main loop for continued interaction
-        jmp @enter_main_loop
-
-@normal_ui:
-        lda #1
-        sta in_ui
-        jsr save_screen
-        jsr HOME
-
-        ; Initialize output tracking
-        lda #OUTPUT_START
-        sta output_row
-        lda #0
-        sta output_col
-        sta lines_since_pause
-
-        ; Print header
-        ldax #ui_header
-        jsr print
-        jsr print_cr
-
-@enter_main_loop:
-        ; Main loop - shared by error path and normal path
-        jsr print_cr
-        ldax #prompt_str
-        jsr print
-        jsr get_input
-        bcs @check_esc
-
-        lda input_len
-        beq @enter_main_loop
-
-        jsr process_input
-        jmp @enter_main_loop
-
-@check_esc:
-        cmp #$9B
-        beq @show_menu
-        cmp #$1B
-        beq @show_menu
-        jmp @enter_main_loop
-
-@show_menu:
-        jsr show_menu
-        bcc @enter_main_loop
-        ; Exit requested - restore screen and return
-        jsr restore_screen
-        lda #0
-        sta in_ui
-
-@exit:
-        rts
-
-msg_error_detected:
-        .byte "DETECTED ERROR - ASKING AGENT...", 0
 
 ;-------------------------------------------------------------------------------
 ; Check for BASIC error by scanning screen for "?" error messages
@@ -688,20 +593,6 @@ screen_addr_hi:
         .byte >$428, >$4A8, >$528, >$5A8, >$628, >$6A8, >$728, >$7A8
         .byte >$450, >$4D0, >$550, >$5D0, >$650, >$6D0, >$750, >$7D0
 
-;===============================================================================
-; Phase 2b: ROM Patch - Natural Language at BASIC Prompt
-;
-; Patches the Applesoft error handler at $D412 (in Language Card RAM)
-; to intercept immediate-mode errors. When user types natural language
-; at the ] prompt, BASIC gets SYNTAX ERROR. Our patched handler:
-; 1. Checks CURLIN=$FFFF (immediate mode)
-; 2. Saves the input buffer at $200
-; 3. Sets error_intercept_flag
-; 4. JMPs to $E003 (warm start) to cleanly return to ] prompt
-; 5. KSWL hook auto-stuffs & to trigger ampersand_entry
-; 6. ampersand_entry sends the saved input to Claude
-;===============================================================================
-
 ; Language Card soft switches
 LCRAM_RW        = $C083         ; Read twice: LC bank 2 read + write
 LCRAM_RO        = $C080         ; Read: LC bank 2 read, write-protect
@@ -709,315 +600,6 @@ LCRAM_ROM_WR    = $C081         ; Read twice: read ROM, write LC bank 2
 LCRAM_ROM       = $C082         ; Read ROM, write-protect LC
 BASIC_WARM      = $E003         ; Applesoft warm start (] prompt)
 
-; Error handler patch location
-ERR_HANDLER     = $D412         ; Applesoft error handler entry point
-ERR_HANDLER_ORIG_SIZE = 3       ; We patch 3 bytes (BIT $D8; BPL ...)
-
-;-------------------------------------------------------------------------------
-; Patch the Applesoft error handler at $D412
-; Replaces "BIT $D8; BPL +3" with "JMP error_intercept"
-; Original bytes: 24 D8 10
-;-------------------------------------------------------------------------------
-patch_error_handler:
-        ; Step 1: Copy ROM ($D000-$FFFF) to LC bank 2 RAM
-        ; LC bank 2 may not have ROM content, so we must copy it first.
-        ; Use $C081 mode: reads come from ROM, writes go to LC bank 2.
-        lda LCRAM_ROM_WR        ; read ROM, write LC bank 2
-        lda LCRAM_ROM_WR        ; (must read soft switch twice)
-
-        lda #$D0
-        sta src_ptr+1
-        lda #$00
-        sta src_ptr
-        tay                     ; Y = 0
-@copy_page:
-        lda (src_ptr),y         ; read from ROM
-        sta (src_ptr),y         ; write to LC bank 2
-        iny
-        bne @copy_page
-        inc src_ptr+1
-        bne @copy_page          ; loops until high byte wraps $FF->$00
-
-        ; Step 2: Switch to LC bank 2 read+write for patching
-        lda LCRAM_RW
-        lda LCRAM_RW
-
-        ; Save original 3 bytes at $D412 (now in LC, same as ROM)
-        lda ERR_HANDLER
-        sta orig_err_byte0
-        lda ERR_HANDLER+1
-        sta orig_err_byte1
-        lda ERR_HANDLER+2
-        sta orig_err_byte2
-
-        ; Patch with JMP error_intercept
-        lda #$4C
-        sta ERR_HANDLER
-        lda #<error_intercept
-        sta ERR_HANDLER+1
-        lda #>error_intercept
-        sta ERR_HANDLER+2
-
-        ; Write-protect LC RAM (keep LC bank 2 mapped for reads)
-        lda LCRAM_RO
-        rts
-
-;-------------------------------------------------------------------------------
-; Restore the original Applesoft error handler at $D412
-;-------------------------------------------------------------------------------
-restore_error_handler:
-        ; Restore original bytes in LC bank 2
-        lda LCRAM_RW
-        lda LCRAM_RW
-        lda orig_err_byte0
-        sta ERR_HANDLER
-        lda orig_err_byte1
-        sta ERR_HANDLER+1
-        lda orig_err_byte2
-        sta ERR_HANDLER+2
-        ; Switch back to ROM reads (unpatch)
-        lda LCRAM_ROM
-        rts
-
-;-------------------------------------------------------------------------------
-; Install KSWL hook for auto-stuffing & after intercepted errors
-;-------------------------------------------------------------------------------
-install_kswl_hook:
-        ; Check if already installed (avoid saving our own address)
-        lda KSWL
-        cmp #<kswl_hook
-        bne @not_installed
-        lda KSWH
-        cmp #>kswl_hook
-        beq @done               ; Already installed
-@not_installed:
-        lda KSWL
-        sta saved_kswl
-        sta saved_kswl_vec
-        lda KSWH
-        sta saved_kswh
-        sta saved_kswl_vec+1
-        ; If original was $0000, point to our own key reader
-        ora saved_kswl_vec
-        bne @set_hook
-        lda #<builtin_keyin
-        sta saved_kswl_vec
-        lda #>builtin_keyin
-        sta saved_kswl_vec+1
-@set_hook:
-        lda #<kswl_hook
-        sta KSWL
-        lda #>kswl_hook
-        sta KSWH
-@done:
-        rts
-
-;-------------------------------------------------------------------------------
-; Restore original KSWL handler
-;-------------------------------------------------------------------------------
-restore_kswl:
-        lda saved_kswl
-        sta KSWL
-        lda saved_kswh
-        sta KSWH
-        rts
-
-;-------------------------------------------------------------------------------
-; Error intercept - called from patched $D412
-; Entry: X = error code (from Applesoft)
-; For immediate-mode errors: save input, set flag, go to warm start
-; For all other cases: execute the original error handler code
-;-------------------------------------------------------------------------------
-error_intercept:
-        ; Check if immediate mode: only CURLIN_H ($76) is set to $FF
-        ; (Applesoft does NOT set CURLIN_L for immediate mode)
-        lda CURLIN_H
-        cmp #$FF
-        bne @not_immediate
-
-        ; Immediate mode error - save input buffer before warm start
-        stx temp1
-        jsr save_input_buf_200
-        lda #1
-        sta error_intercept_flag
-        lda #0
-        sta kbd_stuff_state
-        jmp BASIC_WARM
-
-@not_immediate:
-        ; Not immediate mode - execute original error handler
-        bit $D8
-        bpl @no_onerr
-        jmp $F2E9
-@no_onerr:
-        ; Phase 3: Auto-invoke agent for program errors
-        ; Skip BREAK (255) and REENTER (254) - intentional/non-error stops
-        cpx #255
-        beq @no_phase3
-        cpx #254
-        beq @no_phase3
-        lda #1
-        sta program_error_flag
-        lda #0
-        sta kbd_stuff_state
-@no_phase3:
-        jmp $D419           ; Normal handler prints error, returns to ]
-
-;-------------------------------------------------------------------------------
-; KSWL hook - keepalive polling + auto-stuffs & + CR for error flags
-;-------------------------------------------------------------------------------
-kswl_hook:
-        ; Phase 2b: auto-stuff & after immediate-mode error
-        lda error_intercept_flag
-        bne @stuff_ampersand
-
-        ; Phase 3: auto-stuff & after program error
-        lda program_error_flag
-        bne @stuff_ampersand
-
-        ; No flags - enter keepalive polling loop
-        ; Sit here checking keyboard + polling network periodically
-@poll_loop:
-        lda $C000               ; Check keyboard
-        bmi @key_ready          ; Bit 7 set = key available
-        inc poll_counter_lo
-        bne @poll_loop
-        inc poll_counter_hi
-        bne @poll_loop
-        ; Both wrapped (~65536 iterations, roughly 1 sec at 1MHz)
-        txa
-        pha
-        tya
-        pha
-        jsr ip65_process        ; Keep TCP connection alive
-        pla
-        tay
-        pla
-        tax
-        jmp @poll_loop
-
-@key_ready:
-        jmp (saved_kswl_vec)    ; Original handler reads the key
-
-@stuff_ampersand:
-        lda kbd_stuff_state
-        bne @stuff_cr
-        inc kbd_stuff_state
-        lda #($26 | $80)       ; & with high bit
-        rts
-@stuff_cr:
-        lda #0
-        sta kbd_stuff_state
-        lda #$8D               ; CR
-        rts
-
-saved_kswl_vec:
-        .word $0000
-
-;-------------------------------------------------------------------------------
-; Builtin key reader - fallback when original KSWL was $0000
-;-------------------------------------------------------------------------------
-builtin_keyin:
-        lda $C000
-        bpl builtin_keyin
-        bit $C010               ; Clear keyboard strobe
-        rts
-
-;-------------------------------------------------------------------------------
-; Save BASIC input buffer ($200) to saved_input_buf
-;-------------------------------------------------------------------------------
-save_input_buf_200:
-        ldy #0
-@loop:
-        lda BASIC_INPUT_BUF,y
-        sta saved_input_buf,y
-        beq @done
-        cmp #$8D
-        beq @done_cr
-        iny
-        cpy #MAX_INPUT
-        bcc @loop
-        bcs @done
-@done_cr:
-        lda #0
-        sta saved_input_buf,y
-@done:
-        sty saved_input_len
-        rts
-
-;-------------------------------------------------------------------------------
-; Copy saved input buffer to input_buffer (for send_chat)
-;-------------------------------------------------------------------------------
-copy_saved_input:
-        ldy #0
-@loop:
-        lda saved_input_buf,y
-        beq @done
-        and #$7F
-        cmp #$20
-        bcc @done
-        sta input_buffer,y
-        iny
-        cpy #MAX_INPUT
-        bcc @loop
-@done:
-        sty input_len
-        lda #0
-        sta input_buffer,y
-        rts
-
-; Save text screen
-;-------------------------------------------------------------------------------
-save_screen:
-        lda #<TEXTPAGE
-        sta src_ptr
-        lda #>TEXTPAGE
-        sta src_ptr+1
-        lda #<SCREEN_SAVE
-        sta dst_ptr
-        lda #>SCREEN_SAVE
-        sta dst_ptr+1
-
-        ldx #4                ; 4 pages
-@page:
-        ldy #0
-@byte:
-        lda (src_ptr),y
-        sta (dst_ptr),y
-        iny
-        bne @byte
-        inc src_ptr+1
-        inc dst_ptr+1
-        dex
-        bne @page
-        rts
-
-;-------------------------------------------------------------------------------
-; Restore text screen
-;-------------------------------------------------------------------------------
-restore_screen:
-        lda #<SCREEN_SAVE
-        sta src_ptr
-        lda #>SCREEN_SAVE
-        sta src_ptr+1
-        lda #<TEXTPAGE
-        sta dst_ptr
-        lda #>TEXTPAGE
-        sta dst_ptr+1
-
-        ldx #4
-@page:
-        ldy #0
-@byte:
-        lda (src_ptr),y
-        sta (dst_ptr),y
-        iny
-        bne @byte
-        inc src_ptr+1
-        inc dst_ptr+1
-        dex
-        bne @page
-        rts
 
 ;-------------------------------------------------------------------------------
 ; Load configuration from disk (or use defaults)
@@ -1043,19 +625,22 @@ load_config:
         lda #1
         sta CONFIG_IP+3
 
-        ; Port 8080
-        lda #<8080
+        ; Port 6502 (of course)
+        lda #<DEFAULT_PORT
         sta CONFIG_PORT
-        lda #>8080
+        lda #>DEFAULT_PORT
         sta CONFIG_PORT+1
 
-        ; Default model: Sonnet
-        lda #MODEL_SONNET
+        ; Default model: Opus
+        lda #MODEL_OPUS
         sta CONFIG_MODEL
 
         ; Default display: 40U (uppercase)
         lda #DISPLAY_40U
         sta CONFIG_DISPLAY
+
+        lda #DEFAULT_WATCHDOG
+        sta CONFIG_WATCHDOG
 
         ; Mark as valid
         lda #CONFIG_MAGIC_VAL
@@ -1097,6 +682,13 @@ load_config_file:
         cmp #CONFIG_MAGIC_VAL
         bne @fail
 
+        ; A file from before the watchdog byte: the default
+        lda read_trans
+        cmp #CONFIG_SIZE
+        bcs :+
+        lda #DEFAULT_WATCHDOG
+        sta CONFIG_WATCHDOG
+:
         clc                      ; Success
         rts
 
@@ -1114,27 +706,28 @@ load_config_file:
 ; Returns: C=0 success, C=1 failure
 ;-------------------------------------------------------------------------------
 save_config_file:
-        ; NOTE: ProDOS file save is currently disabled due to MLI pathname
-        ; handling issues when called from IP65-enabled code. Config changes
-        ; are kept in memory but not persisted to disk.
-        ; TODO: Investigate ProDOS MLI error $40 with pathname operations
-
-        ; Ensure magic is set (config valid in memory)
+        ; Valid in memory either way, and safe from programs that use page 3
         lda #CONFIG_MAGIC_VAL
         sta CONFIG_MAGIC
+        jsr save_config_shadow
 
-        ; For now, just return success (config is valid in RAM)
-        clc
-        rts
+        ; CLAUDECONF next to AGENT.SYSTEM (ProDOS's prefix is the boot volume)
+        jsr MLI
+        .byte MLI_CREATE
+        .word create_parms
+        bcc @open
+        cmp #$47                 ; duplicate filename: it's already there
+        bne @fail
+@open:
+        jsr MLI
+        .byte MLI_OPEN
+        .word open_parms
+        bcs @fail
+        lda open_refnum
+        sta write_refnum
+        sta close_refnum
 
-        ; Original save code disabled - uncomment when fixed:
-        ; jsr MLI
-        ; .byte MLI_OPEN
-        ; .word open_parms
-        ; bcs @fail
-        ; ... etc ...
-
-        ; Write config data from CONFIG_IP
+        ; Write config data from CONFIG_IP (overwrites the old one in place)
         jsr MLI
         .byte MLI_WRITE
         .word write_parms
@@ -1144,6 +737,7 @@ save_config_file:
         jsr MLI
         .byte MLI_CLOSE
         .word close_parms
+        bcs @fail
 
         clc                      ; Success
         rts
@@ -1154,10 +748,13 @@ save_config_file:
         .byte MLI_CLOSE
         .word close_parms
         pla                      ; Restore error code
-        sec
-        rts
-
 @fail:
+        ; Settings still work until the next boot; say why they won't stick
+        ; ($2B = write-protected disk)
+        sta config_save_err
+        ldax #msg_not_saved
+        jsr print_status
+        lda config_save_err
         sec                      ; Failure (A = error code)
         rts
 
@@ -1165,21 +762,9 @@ save_config_file:
 ; Main UI
 ;===============================================================================
 main_ui:
-        ; Clear screen and home cursor
-        jsr HOME
+        jsr draw_ui
 
-        ; Initialize output tracking
-        lda #OUTPUT_START
-        sta output_row
-        lda #0
-        sta output_col
-        sta lines_since_pause    ; Reset pagination counter
-
-        ; Print header
-        ldax #ui_header
-        jsr print
-        jsr print_cr
-
+main_ui_loop:
 @main_loop:
         ; Position cursor at input line (line 23) for prompt
         lda #INPUT_LINE
@@ -1187,7 +772,7 @@ main_ui:
         jsr VTAB
         lda #0
         sta CH
-        jsr CLREOL
+        jsr clear_eol
 
         ; Print prompt
         ldax #prompt_str
@@ -1206,69 +791,26 @@ main_ui:
         jmp @main_loop
 
 @check_esc:
-        ; A contains the key
-        cmp #$9B             ; ESC
-        beq @show_menu
-        cmp #$1B             ; ESC (ASCII)
-        beq @show_menu
+        ; ESC clears the line (or does nothing on an empty one - a held ESC
+        ; that brought you back from a program repeats into here)
+        lda #0
+        sta input_len
+        jsr redraw_input
         jmp @main_loop
 
-@show_menu:
-        jsr show_menu
-        bcc @main_loop       ; Continue
-        ; Exit requested
-        rts
-
 ;-------------------------------------------------------------------------------
-; Draw the UI
-; Uses VTAB for screen buffer + CRs for terminal positioning
+; Clear the screen and draw the header; the log starts at OUTPUT_START
 ;-------------------------------------------------------------------------------
 draw_ui:
-        ; Initialize output position
+        jsr clear_screen
         lda #OUTPUT_START
         sta output_row
         lda #0
         sta output_col
-
-        ; Position at line 0 for screen buffer
-        lda #0
-        sta CV
-        sta CH
-        jsr VTAB
-
-        ; Print header
+        sta lines_since_pause
         ldax #ui_header
         jsr print
-
-        ; CR for terminal
-        lda #$8D
-        jsr COUT
-
-        ; Position at line 21 for screen buffer
-        lda #SEPARATOR_LINE
-        sta CV
-        lda #0
-        sta CH
-        jsr VTAB
-
-        ; Print 20 CRs for terminal (to get from line 1 to line 21)
-        ldx #20
-@blank_lines:
-        lda #$8D
-        jsr COUT
-        dex
-        bne @blank_lines
-
-        ; Print separator
-        ldax #ui_separator
-        jsr print
-
-        ; CR for terminal
-        lda #$8D
-        jsr COUT
-
-        ; Status and prompt will be drawn by main_loop
-        rts
+        jmp print_cr
 
 ;-------------------------------------------------------------------------------
 ; Draw the full command frame (called when wrapping)
@@ -1278,38 +820,6 @@ draw_command_area:
         ; Output CR to advance line in terminal mode
         lda #$8D
         jsr COUT
-        rts
-
-;-------------------------------------------------------------------------------
-; Draw just the input area (status + input prompt)
-; Uses VTAB for screen buffer + CRs for terminal
-;-------------------------------------------------------------------------------
-draw_input_area:
-        ; Position at status line for screen buffer
-        lda #STATUS_LINE
-        sta CV
-        lda #0
-        sta CH
-        jsr VTAB
-
-        ; Print status
-        ldax #msg_ready
-        jsr print
-
-        ; CR for terminal
-        lda #$8D
-        jsr COUT
-
-        ; Position at input line for screen buffer
-        lda #INPUT_LINE
-        sta CV
-        lda #0
-        sta CH
-        jsr VTAB
-
-        ; Print prompt
-        ldax #prompt_str
-        jsr print
         rts
 
 ;-------------------------------------------------------------------------------
@@ -1340,7 +850,7 @@ position_input:
 ; Clear current line
 ;-------------------------------------------------------------------------------
 clear_line:
-        jsr CLREOL
+        jsr clear_eol
         rts
 
 ;-------------------------------------------------------------------------------
@@ -1348,11 +858,20 @@ clear_line:
 ; Returns: C=1 if special key (key in A), C=0 if normal input
 ;-------------------------------------------------------------------------------
 get_input:
+        jsr set_input_visible
+        lda prefill_input
+        beq @empty
+        ; Start with text already in input_buffer (e.g. "FIX: ...")
+        lda #0
+        sta prefill_input
+        jsr redraw_input
+        jmp @loop
+@empty:
         lda #0
         sta input_len
 
 @loop:
-        jsr RDKEY
+        jsr read_key
 
         ; Check ESC
         cmp #$9B
@@ -1378,19 +897,28 @@ get_input:
         cmp #$A0             ; Space (high bit set)
         bcc @loop            ; Skip control chars
 
-        ; Buffer full?
+        ; Buffer full? Say so (a beep), don't just drop the key
         ldx input_len
         cpx #MAX_INPUT
-        bcs @loop
+        bcc :+
+        jsr BELL1
+        jmp @loop
+:
 
         ; Store (clear high bit)
         and #$7F
         sta input_buffer,x
         inc input_len
 
-        ; Echo (with high bit)
+        ; Echo, or slide the line left once it's full
+        ldx input_len
+        cpx input_visible
+        bcs @redraw
         ora #$80
         jsr COUT
+        jmp @loop
+@redraw:
+        jsr redraw_input
         jmp @loop
 
 @delete:
@@ -1398,6 +926,10 @@ get_input:
         beq @loop
 
         dec input_len
+        ldx input_len           ; was the line scrolled? then redraw it
+        inx
+        cpx input_visible
+        bcs @redraw
 
         ; Backspace-space-backspace
         lda #$88             ; Left arrow
@@ -1413,11 +945,57 @@ get_input:
         rts
 
 @done:
-        ; Null terminate
+        ; Null terminate - and clear the rest of the buffer: commands read
+        ; their argument at a fixed offset, so a bare /PORT must find zeros
+        ; there, not the end of an earlier, longer line
         ldx input_len
         lda #0
-        sta input_buffer,x
+:       sta input_buffer,x
+        inx
+        cpx #MAX_INPUT+1
+        bcc :-
         clc
+        rts
+
+;-------------------------------------------------------------------------------
+; Redraw the input line after "AGENT> ", showing the end of input_buffer so
+; long requests scroll sideways instead of wrapping (a wrap on the bottom
+; row would scroll the whole screen)
+;-------------------------------------------------------------------------------
+PROMPT_LEN      = 7             ; "AGENT> "
+
+redraw_input:
+        jsr set_input_visible
+        lda #INPUT_LINE
+        sta CV
+        jsr VTAB
+        lda #PROMPT_LEN
+        sta CH
+        ldx #0
+        lda input_len
+        sec
+        sbc input_visible
+        bcc @from_x
+        tax
+        inx                     ; leave the last column for the cursor
+@from_x:
+        cpx input_len
+        bcs @clear
+        lda input_buffer,x
+        ora #$80
+        jsr COUT
+        inx
+        bne @from_x
+@clear:
+        jsr clear_eol
+        rts
+
+; input_visible = columns available for input text (screen width - prompt - 1)
+set_input_visible:
+        lda screen_width_m1
+        sec
+        sbc #PROMPT_LEN
+        sta input_visible
         rts
 
 ;-------------------------------------------------------------------------------
@@ -1443,195 +1021,109 @@ process_input:
 ; NOTE: All comparisons convert to uppercase for case-insensitive matching
 ;-------------------------------------------------------------------------------
 handle_command:
-        ; Get command word and convert to uppercase
-        lda input_buffer+1
+        ; Look the word after "/" up in cmd_table (whole word, any case)
+        ldx #0                  ; table offset
+@next_entry:
+        lda cmd_table,x
+        beq @not_local          ; end of table
+        ldy #1                  ; input_buffer+1 = first letter
+@compare:
+        lda cmd_table,x
+        beq @word_end
+        sta temp1
+        lda input_buffer,y
         jsr to_upper
-
-        ; /HELP
-        cmp #'H'
-        bne :+
-        jmp @help
-:
-        ; /IP
-        cmp #'I'
-        bne :+
-        jmp @ip
-:
-        ; /LIST
-        cmp #'L'
-        bne :+
-        jmp @list
-:
-        ; /CODE or /CLEAR (both start with C)
-        cmp #'C'
-        bne @check_q
-        lda input_buffer+2
-        jsr to_upper
-        cmp #'O'
-        beq @code
-        cmp #'L'
-        beq @clear
-        jmp @unknown
-
-@code:
-        jmp cmd_code
-
-@clear:
-        jsr HOME
-        jsr draw_ui
+        cmp temp1
+        bne @skip_entry
+        inx
+        iny
+        bne @compare
+@word_end:
+        ; table word ended - input must end too (space or end of line)
+        lda input_buffer,y
+        beq @found
+        cmp #' '
+        beq @found
+@skip_entry:
+        lda cmd_table,x         ; skip rest of word...
+        beq @skip_addr
+        inx
+        bne @skip_entry
+@skip_addr:
+        inx                     ; ...its zero and handler address
+        inx
+        inx
+        bne @next_entry
+@found:
+        ; Jump to the handler (RTS trick); its RTS returns to our caller
+        lda cmd_table+2,x
+        pha
+        lda cmd_table+1,x
+        pha
         rts
+@not_local:
+        ; Everything else is the proxy's business (/HELP, /RESET, /UNDO...)
+        jmp send_chat
 
-@check_q:
-        ; /QUIT
-        cmp #'Q'
-        bne @not_quit
-        jmp @quit
-@not_quit:
-        ; /EXIT (alias for /SUSPEND)
-        cmp #'E'
-        beq @suspend
+; Commands the Apple II handles itself: word, 0, handler-1
+.macro command word, handler
+        .byte word, 0
+        .word handler-1
+.endmacro
+cmd_table:
+        command "RUN",     cmd_run
+        command "EXIT",    cmd_suspend
+        command "SUSPEND", cmd_suspend
+        command "QUIT",    cmd_suspend
+        command "SETIP",   cmd_setip
+        command "PORT",    cmd_port
+        command "IP",      cmd_ip
+        command "SAVE",    cmd_save
+        command "LIST",    cmd_list
+        command "CODE",    cmd_code
+        command "CLEAR",   cmd_clear
+        command "MORE",    cmd_more
+        command "DISPLAY", cmd_display
+        command "MODEL",   cmd_model
+        command "RESET",   cmd_reset
+        .byte 0
 
-        ; /SETIP, /SAVE, or /SUSPEND
-        cmp #'S'
-        bne @check_p
-        lda input_buffer+2
-        jsr to_upper
-        cmp #'E'
-        beq @setip
-        cmp #'A'
-        beq @save
-        cmp #'U'
-        beq @suspend
-        jmp @unknown
+cmd_clear:
+        jmp draw_ui
 
-@setip:
-        jsr cmd_setip
-        rts
-
-@save:
-        jsr cmd_save
-        rts
-
-@suspend:
-        ; Install hooks so user can return to agent
-        ; Ctrl-Y hook: JMP ampersand_entry
-        lda #$4C             ; JMP opcode
+;-------------------------------------------------------------------------------
+; /EXIT, /SUSPEND - drop to the ] prompt, & or Ctrl-Y comes back
+;-------------------------------------------------------------------------------
+cmd_suspend:
+        ; Every way back (ESC at ], &, Ctrl-Y, Ctrl-Reset) lands on
+        ; RETURN_ENTRY, the same as from a program. (This used to copy the
+        ; ROM over the language card to patch Applesoft's error handler -
+        ; which wiped out ProDOS - and poll the network from a keyboard hook,
+        ; which scribbled on Applesoft's zero page mid-statement.)
+        jsr install_resident_hooks
+        jsr install_hook        ; & -> RETURN_ENTRY
+        lda #$4C                ; Ctrl-Y -> RETURN_ENTRY
         sta CTRLY_VECTOR
-        lda #<ampersand_entry
+        lda #<RETURN_ENTRY
         sta CTRLY_VECTOR+1
-        lda #>ampersand_entry
+        lda #>RETURN_ENTRY
         sta CTRLY_VECTOR+2
-        ; & hook: JMP ampersand_entry
-        lda #$4C             ; JMP opcode
-        sta AMPER_VECTOR
-        lda #<ampersand_entry
-        sta AMPER_VECTOR+1
-        lda #>ampersand_entry
-        sta AMPER_VECTOR+2
+        lda #<KSW_HOOK          ; ESC at ] -> RETURN_ENTRY
+        sta KSWL
+        lda #>KSW_HOOK
+        sta KSWH
 
-        ; Clear state so ampersand hook works cleanly
         lda #0
         sta in_ui
-        sta input_len            ; Prevent stale input from being sent on & return
-        sta error_intercept_flag
-        sta kbd_stuff_state
-        sta program_error_flag
-        sta poll_counter_lo
-        sta poll_counter_hi
+        sta input_len
+        jsr init_applesoft      ; IP65 shares Applesoft's zero page ($80-$99)
 
-        ; Phase 2b: Patch error handler in Language Card RAM
-        ; This intercepts immediate-mode errors (natural language at ] prompt)
-        jsr patch_error_handler
-
-        ; Phase 2b: Install KSWL hook for auto-stuffing & after errors
-        jsr install_kswl_hook
-
-        ; Show message and drop to BASIC
+        ; Show message and drop to BASIC (plain 40 columns, ROM output)
+        jsr text40
         jsr HOME
         ldax #msg_suspended
         jsr print
-        jmp $E003            ; BASIC warm start (]) - no return
-
-@check_p:
-        ; /PORT or /PROMPT
-        cmp #'P'
-        bne @check_m
-        lda input_buffer+2
-        jsr to_upper
-        cmp #'O'
-        beq @port
-        cmp #'R'
-        bne @unknown
-        ; /PROMPT - send to server as chat message
-        jsr cmd_prompt
-        rts
-@port:
-        jsr cmd_port
-        rts
-
-@check_m:
-        ; /MODEL or /MORE (both start with M)
-        cmp #'M'
-        bne @check_d
-        lda input_buffer+2
-        jsr to_upper
-        cmp #'O'
-        bne @unknown
-        lda input_buffer+3
-        jsr to_upper
-        cmp #'R'
-        beq @more
-        ; Default to /MODEL for /MO + anything else
-        jsr cmd_model
-        rts
-@more:
-        jsr cmd_more
-        rts
-
-@check_d:
-        ; /DISPLAY
-        cmp #'D'
-        bne @check_r
-        jsr cmd_display
-        rts
-
-@check_r:
-        ; /RESET - Send to server, it handles clearing session
-        cmp #'R'
-        bne @unknown
-        lda input_buffer+2
-        jsr to_upper
-        cmp #'E'
-        bne @unknown
-        ; Send "/RESET" to server as chat message
-        jsr cmd_reset
-        rts
-
-@help:
-        jsr cmd_help
-        rts
-
-@ip:
-        jsr cmd_ip
-        rts
-
-@list:
-        jsr cmd_list
-        rts
-
-@quit:
-        ; Disconnect before exiting
-        jsr disconnect
-        ; Signal exit (will be handled by main loop)
-        pla                  ; Pop return address
-        pla
-        sec                  ; Signal exit
-        rts
-
-@unknown:
-        ldax #msg_unknown_cmd
-        jsr print_status
-        rts
+        jmp BASIC_WARM          ; ] prompt - no return
 
 ;-------------------------------------------------------------------------------
 ; Command: /HELP
@@ -1649,31 +1141,89 @@ cmd_ip:
         jsr scroll_output
         ldax #msg_current_ip
         jsr print
-
-        ; Print current IP
-        lda CONFIG_IP
-        jsr print_decimal
-        lda #'.'
-        jsr print_a
-        lda CONFIG_IP+1
-        jsr print_decimal
-        lda #'.'
-        jsr print_a
-        lda CONFIG_IP+2
-        jsr print_decimal
-        lda #'.'
-        jsr print_a
-        lda CONFIG_IP+3
-        jsr print_decimal
-        lda #':'
-        jsr print_a
-
-        ; Print port
-        ; (simplified - just show 8080)
-        ldax #msg_port_8080
-        jsr print
+        jsr print_proxy_address
         jsr print_cr
         rts
+
+;-------------------------------------------------------------------------------
+; Print CONFIG_IP:CONFIG_PORT ("192.168.1.100:6502")
+;-------------------------------------------------------------------------------
+print_proxy_address:
+        ldx #0
+@octet:
+        txa
+        pha
+        lda CONFIG_IP,x
+        jsr print_decimal
+        pla
+        tax
+        lda #'.'
+        cpx #3
+        bne :+
+        lda #':'
+:       jsr print_a
+        inx
+        cpx #4
+        bne @octet
+        jsr format_port
+        ldax #port_str
+        jmp print
+
+;-------------------------------------------------------------------------------
+; Format CONFIG_PORT as decimal into port_str (zero terminated)
+;-------------------------------------------------------------------------------
+format_port:
+        lda CONFIG_PORT
+        sta port_lo
+        lda CONFIG_PORT+1
+        sta port_hi
+        ldx #0                  ; output position
+        ldy #0                  ; power-of-ten index
+        lda #0
+        sta temp2               ; 1 once a digit has been written
+@power:
+        lda #0
+        sta temp1               ; digit
+@sub:
+        lda port_lo
+        sec
+        sbc pow10_lo,y
+        pha
+        lda port_hi
+        sbc pow10_hi,y
+        bcc @digit_done
+        sta port_hi
+        pla
+        sta port_lo
+        inc temp1
+        bne @sub
+@digit_done:
+        pla
+        lda temp1
+        ora temp2
+        beq @skip               ; no leading zeros
+        lda temp1
+        ora #'0'
+        sta port_str,x
+        inx
+        lda #1
+        sta temp2
+@skip:
+        iny
+        cpy #4
+        bcc @power
+        lda port_lo             ; ones digit always
+        ora #'0'
+        sta port_str,x
+        inx
+        lda #0
+        sta port_str,x
+        rts
+
+pow10_lo:
+        .byte <10000, <1000, <100, <10
+pow10_hi:
+        .byte >10000, >1000, >100, >10
 
 ;-------------------------------------------------------------------------------
 ; Command: /LIST - Show BASIC program listing
@@ -1757,8 +1307,10 @@ cmd_setip:
         sbc #'0'
         sta temp2            ; Save digit
 
-        ; Multiply parse_value by 10
+        ; Multiply parse_value by 10 (an octet over 255 is a typo)
         lda parse_value
+        cmp #26
+        bcs @invalid         ; 26 * 10 > 255
         asl                  ; x2
         sta temp1
         asl                  ; x4
@@ -1766,15 +1318,16 @@ cmd_setip:
         clc
         adc temp1            ; x8 + x2 = x10
         adc temp2            ; + digit
+        bcs @invalid
         sta parse_value
 
         iny
         bne @digit_loop
 
 @store_octet:
-        ; Store octet
+        ; Store octet (in new_ip: CONFIG_IP only changes if all of it parses)
         lda parse_value
-        sta CONFIG_IP,x
+        sta new_ip,x
         inx
         cpx #4
         bcs @done_parse
@@ -1786,10 +1339,18 @@ cmd_setip:
         lda parse_value
         cpx #4
         bcs @done_parse
-        sta CONFIG_IP,x
+        sta new_ip,x
         inx
 
 @done_parse:
+        cpx #4               ; exactly four numbers
+        bne @invalid
+        ldx #3
+:       lda new_ip,x
+        sta CONFIG_IP,x
+        dex
+        bpl :-
+
         ; Show new IP on status line (direct screen writes)
         ldax #msg_ip_set
         jsr print_status     ; "IP SET: " - clears line and starts writing
@@ -1820,7 +1381,7 @@ cmd_setip:
 
 ;-------------------------------------------------------------------------------
 ; Command: /PORT <port>
-; Format: /PORT 8080
+; Format: /PORT 6502
 ;-------------------------------------------------------------------------------
 cmd_port:
         ; Skip "/PORT "
@@ -1854,13 +1415,13 @@ cmd_port:
         sta temp2            ; Save digit
 
         ; Multiply port by 10 (16-bit)
-        ; First, port * 2
+        ; First, port * 2 (not in temp1/temp1+1: temp1+1 is temp2, the digit)
         lda port_lo
         asl
-        sta temp1
+        sta port_x2
         lda port_hi
         rol
-        sta temp1+1
+        sta port_x2+1
 
         ; port * 8 (shift 3 more)
         lda port_lo
@@ -1887,10 +1448,10 @@ cmd_port:
         ; port*8 + port*2 = port*10
         lda port_lo
         clc
-        adc temp1
+        adc port_x2
         sta port_lo
         lda port_hi
-        adc temp1+1
+        adc port_x2+1
         sta port_hi
 
         ; + digit
@@ -1906,6 +1467,9 @@ cmd_port:
         bne @digit_loop
 
 @done_parse:
+        lda port_lo             ; no digits, or port 0: not a port
+        ora port_hi
+        beq @invalid
         ; Store port
         lda port_lo
         sta CONFIG_PORT
@@ -1916,21 +1480,10 @@ cmd_port:
         ldax #msg_port_set
         jsr print_status     ; "PORT SET: " - clears line
 
-        ; Print port (simplified - show if 8080)
-        lda CONFIG_PORT
-        cmp #<8080
-        bne @show_custom
-        lda CONFIG_PORT+1
-        cmp #>8080
-        bne @show_custom
-        ldax #msg_port_8080
-        jsr status_print     ; Append "8080"
-        jmp @auto_save
-
-@show_custom:
-        ; Just show "CUSTOM" for custom ports
-        ldax #msg_custom
-        jsr status_print     ; Append "CUSTOM"
+        ; Show the port number
+        jsr format_port
+        ldax #port_str
+        jsr status_print
 
 @auto_save:
         ; Auto-save to disk
@@ -2075,7 +1628,6 @@ cmd_display:
         sta display_mode
         jsr save_config_file
         jsr apply_display_mode
-        jsr HOME
         jsr draw_ui
         ; Forward to proxy so it adjusts formatting
         jsr send_chat
@@ -2125,6 +1677,8 @@ cmd_model:
         ldax #msg_model_set
         jsr print_status         ; "MODEL: " - clears line
         jsr status_print_model   ; Append model name
+        ; Tell the proxy too (it picks the model per session)
+        jsr send_chat
         rts
 
 @show_current:
@@ -2187,21 +1741,32 @@ status_print_model:
 ; Send chat message to server (uses persistent connection)
 ;-------------------------------------------------------------------------------
 send_chat:
-        ; Ensure we have a connection
+        lda #2                   ; one retry if the connection turns out dead
+        sta send_attempts
+@attempt:
+        ; Let IP65 see a FIN/RST that arrived while we sat at the prompt,
+        ; so ensure_connected knows whether the connection is really up.
+        ; (On a real LAN broadcasts queue up in the W5100 meanwhile - a FIN
+        ; can be a dozen frames back - and an idle call costs next to nothing)
+        jsr drain_network
         jsr ensure_connected
         bcs @failed
 
         ; Clear output area for new response
         jsr clear_output_area
 
+        jsr clear_input_line
+
         ; Initialize receive state BEFORE sending (callbacks may trigger)
         lda #0
         sta recv_state
+        sta response_done
         sta got_code
         sta code_offset
         sta code_offset+1
         sta pending_ack_count
         sta in_callback
+        sta rx_any
         lda #<BASIC_START
         sta dst_ptr
         lda #>BASIC_START
@@ -2209,17 +1774,36 @@ send_chat:
 
         ; Build and send CHAT packet (no INIT needed - sent on connect)
         jsr send_chat_packet
+        bcs @retry               ; send failed - proxy went away
         ; Process any incoming data
         jsr ip65_process
         jsr ip65_process
         jsr ip65_process
+        lda is_connected
+        beq @retry
 
         ; Wait for response (state already initialized)
         jsr receive_response_no_init
+        lda is_connected
+        bne @got_reply
+        lda rx_any               ; dropped before any reply: send it again
+        beq @retry
+@got_reply:
+        lda preview_on
+        beq @text
+        jsr preview_off
+@text:
+        ; A program arrived? Offer to run it right now.
+        jsr offer_program
 
         ; DON'T close connection - keep it open for next message
         rts
 
+@retry:
+        lda #0
+        sta is_connected
+        dec send_attempts
+        bne @attempt
 @failed:
         ldax #msg_conn_fail
         jsr print_status
@@ -2273,16 +1857,174 @@ connect_to_proxy:
 ; Returns: C=0 if connected, C=1 if failed
 ;-------------------------------------------------------------------------------
 ensure_connected:
-        ; Check if already connected
+        ; The W5100 was reset (agent_reentry noticed): start over
+        lda net_needs_init
+        beq :+
+        lda #0
+        sta net_needs_init
+        sta is_connected
+        jmp @restart
+:
+        ; Check if already connected (and IP65 agrees - the proxy may have
+        ; gone away while a program was running)
         lda is_connected
-        bne @already_connected
+        beq @reconnect
+        lda tcp_state
+        cmp #TCP_ESTABLISHED
+        beq @already_connected
+@reconnect:
+        lda #0
+        sta is_connected
 
         ; Not connected - try to reconnect silently
         jsr connect_to_proxy
+        bcc @done
+        ; The proxy may have moved (the Mac got a new address) or only just
+        ; been started: ask the network where it is
+        ldax #msg_finding_status
+        jsr print_status
+        jsr find_proxy
+        bcs @restart
+        jsr save_if_moved
+        jsr connect_to_proxy
+        bcc @done
+@restart:
+        ; Still nothing: the Uthernet may have been reset (Ctrl-Reset) or the
+        ; DHCP lease lapsed during a long program. Start the network over.
+        ldax #msg_reinit_net
+        jsr print_status
+        lda #eth_init_default
+        jsr ip65_init
+        bcs @done
+        jsr dhcp_init
+        bcs @done
+        jsr find_proxy          ; (keeps the old address if nobody answers)
+        jsr connect_to_proxy
+@done:
         rts
 
 @already_connected:
         clc                  ; Success
+        rts
+
+;-------------------------------------------------------------------------------
+; Find the proxy on the local network: broadcast DISCOVERY_ASK to UDP
+; DISCOVERY_PORT; the proxy answers DISCOVERY_ANSWER + its TCP port
+; (proxy/unified_proxy.py). On an answer, CONFIG_IP = whoever sent it,
+; CONFIG_PORT = the port in it, C=0. No answer in ~3 s: C=1, config untouched.
+;-------------------------------------------------------------------------------
+DISCOVERY_PORT  = 6502
+DISCOVERY_ASK_LEN = 8           ; "A2AGENT?" / "A2AGENT!"
+
+find_proxy:
+        lda #0
+        sta proxy_found
+        sta proxy_moved
+        ldax #discovery_callback
+        stax udp_callback
+        ldax #DISCOVERY_PORT
+        jsr udp_add_listener    ; (already listening is fine)
+        lda #3
+        sta discovery_tries
+@ask:
+        ldx #3
+        lda #$FF                ; 255.255.255.255
+:       sta udp_send_dest,x
+        dex
+        bpl :-
+        ldax #DISCOVERY_PORT
+        stax udp_send_dest_port
+        stax udp_send_src_port
+        ldax #DISCOVERY_ASK_LEN
+        stax udp_send_len
+        ldax #discovery_ask
+        jsr udp_send
+        lda #24                 ; ~1 s for an answer
+        sta discovery_wait
+@listen:
+        jsr ip65_process
+        lda proxy_found
+        bne @found
+        lda #$80                ; ~43 ms
+        jsr WAIT
+        dec discovery_wait
+        bne @listen
+        dec discovery_tries
+        bne @ask
+        ldax #DISCOVERY_PORT
+        jsr udp_remove_listener
+        sec
+        rts
+@found:
+        ldax #DISCOVERY_PORT
+        jsr udp_remove_listener
+        clc
+        rts
+
+; IP65 calls this for every datagram to DISCOVERY_PORT
+discovery_callback:
+        ldx #DISCOVERY_ASK_LEN-1
+:       lda udp_inp+udp_data,x
+        cmp discovery_answer,x
+        bne @not_ours
+        dex
+        bpl :-
+        ldx #3
+:       lda ip_inp+ip_src,x     ; the proxy is whoever answered
+        cmp CONFIG_IP,x
+        beq :+
+        inc proxy_moved
+        sta CONFIG_IP,x
+:       dex
+        bpl :--
+        lda udp_inp+udp_data+DISCOVERY_ASK_LEN
+        cmp CONFIG_PORT
+        beq :+
+        inc proxy_moved
+        sta CONFIG_PORT
+:       lda udp_inp+udp_data+DISCOVERY_ASK_LEN+1
+        cmp CONFIG_PORT+1
+        beq :+
+        inc proxy_moved
+        sta CONFIG_PORT+1
+:       lda #1
+        sta proxy_found
+@not_ours:
+        rts
+
+; Save the config only when find_proxy changed it (floppy writes are slow)
+save_if_moved:
+        lda proxy_moved
+        beq :+
+        jsr save_config_file
+:       rts
+
+;-------------------------------------------------------------------------------
+; Wait up to A tenths of a second, or until a key is pressed (the key is
+; consumed). Returns C=1 if a key was pressed.
+;-------------------------------------------------------------------------------
+wait_key_or_timeout:
+        sta wait_tenths
+@tick:
+        ldx #2
+@slice:
+        lda KBD
+        bmi @key
+        txa
+        pha
+        lda #$80                ; ~43 ms
+        jsr WAIT
+        pla
+        tax
+        dex
+        bne @slice
+        dec wait_tenths
+        bne @tick
+        clc
+        rts
+@key:
+        bit KBDSTRB
+        sec
         rts
 
 ;-------------------------------------------------------------------------------
@@ -2350,7 +2092,7 @@ send_init_packet:
         sta send_buffer+1
         lda #PKT_INIT
         sta send_buffer+2
-        lda #3               ; Data length = 3 (capabilities + model + display)
+        lda #4               ; Data length = 4 (caps + model + display + version)
         sta send_buffer+3
         lda #0
         sta send_buffer+4
@@ -2359,7 +2101,12 @@ send_init_packet:
         inc tx_seq
 
         ; Data byte 0: capabilities
-        lda col_mode
+        lda has_aux_ram
+        beq @no_aux
+        lda #CAP_AUX_RAM
+@no_aux:
+        ora #CAP_DEPLOY
+        ora col_mode
         sta send_buffer+6
 
         ; Data byte 1: model selection
@@ -2370,6 +2117,10 @@ send_init_packet:
         lda display_mode
         sta send_buffer+8
 
+        ; Data byte 3: protocol version
+        lda #A2P_VERSION
+        sta send_buffer+9
+
         ; Checksum (XOR of type through data)
         lda send_buffer+2    ; Type
         eor send_buffer+3    ; Len lo
@@ -2378,10 +2129,11 @@ send_init_packet:
         eor send_buffer+6    ; Capabilities
         eor send_buffer+7    ; Model
         eor send_buffer+8    ; Display mode
-        sta send_buffer+9
+        eor send_buffer+9    ; Version
+        sta send_buffer+10
 
-        ; Send (10 bytes)
-        lda #10
+        ; Send (11 bytes)
+        lda #11
         sta tcp_send_data_len
         lda #0
         sta tcp_send_data_len+1
@@ -2412,18 +2164,29 @@ send_chat_packet:
         sta send_buffer+5
         inc tx_seq
 
-        ; Copy data (converting to uppercase)
+        ; Copy data: as typed on a mixed-case screen, uppercase on a 40U one
+        ; and for /commands (the proxy matches those in uppercase)
+        lda display_mode
+        cmp #DISPLAY_40U
+        beq :+
+        lda input_buffer
+        cmp #'/'
+:       php                     ; Z set = uppercase it
         ldy #0
 @copy:
         cpy input_len
         beq @done_copy
         lda input_buffer,y
+        plp
+        php
+        bne :+
         jsr to_upper
-        sta send_buffer+6,y
+:       sta send_buffer+6,y
         iny
         bne @copy
 
 @done_copy:
+        plp
         ; Calculate checksum
         lda send_buffer+2    ; Start with type
         eor send_buffer+3
@@ -2548,6 +2311,7 @@ receive_response:
         ; Init state
         lda #0
         sta recv_state
+        sta response_done
         sta got_code
         sta code_offset
         sta code_offset+1
@@ -2565,6 +2329,11 @@ receive_response_no_init:
         lda #0
         sta timeout_lo
         sta timeout_hi
+        sta stop_requested
+        sta silent_frames
+        sta silent_frames+1
+        sta resync_tries
+        jsr set_silence_limit
 
         ldax #msg_receiving
         jsr print_status
@@ -2580,9 +2349,46 @@ receive_response_no_init:
         jsr send_pending_acks
 
         ; Check for completion
-        lda recv_state
-        cmp #STATE_DONE
-        beq @done
+        lda response_done
+        bne @done
+
+        ; Proxy hung up? Don't wait forever.
+        lda is_connected
+        bne @still_connected
+        ldax #msg_conn_lost
+        jsr print_status
+        rts
+@still_connected:
+
+        ; Keys while waiting: with a preview showing, any key flips back to
+        ; the log. Otherwise ESC asks Claude to stop, and ESC again stops
+        ; waiting (for when the network has quietly gone away). Other keys
+        ; stay in the keyboard latch for the next input.
+        lda KBD
+        bpl @no_key
+        ldx preview_on
+        beq @not_preview
+        bit KBDSTRB
+        jsr preview_off
+        jmp @no_key
+@not_preview:
+        cmp #$9B                ; ESC
+        bne @no_key
+        bit KBDSTRB
+        lda stop_requested
+        bne @give_up
+        inc stop_requested
+        jsr send_stop
+        ldax #msg_stopping
+        jsr print_status
+        jmp @no_key
+@give_up:
+        lda #0
+        sta is_connected        ; reconnect next time
+        ldax #msg_gave_up
+        jsr print_status
+        rts
+@no_key:
 
         ; Check timeout - disabled for agentic mode which can take minutes
         ; Agentic loop involves multiple Claude API calls + emulator testing
@@ -2592,7 +2398,16 @@ receive_response_no_init:
         ; lda timeout_hi
         ; cmp #$FF
         ; bcc @wait_loop
-        jmp @wait_loop       ; No timeout - wait forever
+        ; Watchdog: while it works the proxy says something at least every
+        ; 2 s. 20 s of silence means the connection has stalled (on a real
+        ; LAN one did, with 12K stuck in the Mac's queue): start the network
+        ; over, reconnect, and ask for what was lost
+        jsr count_silent_frame
+        bcc :+
+        jsr resync_connection   ; C set: gave up (said so)
+        bcc :+
+        rts
+:       jmp @wait_loop       ; No timeout - wait forever
 
         ; Timeout
         ldax #msg_timeout
@@ -2600,6 +2415,155 @@ receive_response_no_init:
 
 @done:
         rts
+
+;-------------------------------------------------------------------------------
+; Stall watchdog (receive_response_no_init). count_silent_frame counts
+; vertical blanks since the last packet: C set once SILENCE_FRAMES have gone by.
+;-------------------------------------------------------------------------------
+RESYNC_MAX      = 3
+
+; silence_limit = CONFIG_WATCHDOG seconds * 60 frames (0 = never)
+set_silence_limit:
+        lda CONFIG_WATCHDOG
+        sta silence_limit
+        lda #0
+        sta silence_limit+1
+        ldx #2                  ; * 4
+:       asl silence_limit
+        rol silence_limit+1
+        dex
+        bne :-
+        lda silence_limit       ; keep * 4, then * 16 more = * 64, minus * 4
+        sta temp_w
+        lda silence_limit+1
+        sta temp_w+1
+        ldx #4
+:       asl silence_limit
+        rol silence_limit+1
+        dex
+        bne :-
+        sec
+        lda silence_limit
+        sbc temp_w
+        sta silence_limit
+        lda silence_limit+1
+        sbc temp_w+1
+        sta silence_limit+1
+        rts
+
+count_silent_frame:
+        lda RDVBLBAR            ; bit 7 low during vertical blank
+        and #$80
+        tax
+        eor vbl_prev
+        stx vbl_prev
+        beq @check              ; no change
+        txa
+        bne @check              ; blank just ended: not a new frame
+        inc silent_frames
+        bne @check
+        inc silent_frames+1
+@check:
+        lda silence_limit
+        ora silence_limit+1
+        beq @quiet              ; watchdog off
+        lda silent_frames+1
+        cmp silence_limit+1
+        bcc @quiet
+        bne @stalled
+        lda silent_frames
+        cmp silence_limit
+        bcc @quiet
+@stalled:
+        sec
+        rts
+@quiet:
+        clc
+        rts
+
+; Start the network over, reconnect and send /RESYNC (the proxy re-sends the
+; reply's end and the program). C set when it has given up.
+resync_connection:
+        lda #0
+        sta silent_frames
+        sta silent_frames+1
+        inc resync_tries
+        lda resync_tries
+        cmp #RESYNC_MAX+1
+        bcc @try
+        lda #0
+        sta is_connected
+        ldax #msg_conn_lost
+        jsr print_status
+        sec
+        rts
+@try:
+        ldax #msg_stalled
+        jsr print_status
+        lda #1                  ; a W5100 left in a bad state is what this is for
+        sta net_needs_init
+        jsr ensure_connected
+        bcs @later              ; no luck: try again after another 20 s
+        lda #0                  ; the new connection starts on a packet boundary
+        sta recv_state
+        sta in_callback
+        ldx #RESYNC_CMD_LEN-1
+:       lda resync_cmd,x
+        sta input_buffer,x
+        dex
+        bpl :-
+        lda #RESYNC_CMD_LEN
+        sta input_len
+        jsr send_chat_packet
+@later:
+        clc
+        rts
+
+resync_cmd:
+        .byte "/RESYNC"
+RESYNC_CMD_LEN = * - resync_cmd
+
+;-------------------------------------------------------------------------------
+; Empty the input line while Claude works (the proxy echoes the request,
+; word-wrapped, at the top of the log)
+;-------------------------------------------------------------------------------
+clear_input_line:
+        lda input_len           ; input_buffer stays for a resend
+        pha
+        lda #0
+        sta input_len
+        jsr redraw_input
+        pla
+        sta input_len
+        rts
+
+;-------------------------------------------------------------------------------
+; Handle everything queued in the W5100 (up to 24 frames)
+;-------------------------------------------------------------------------------
+drain_network:
+        lda #24
+        sta drain_count
+:       jsr ip65_process
+        dec drain_count
+        bne :-
+        rts
+
+;-------------------------------------------------------------------------------
+; Ask the proxy to stop the request it's working on (ESC while waiting)
+;-------------------------------------------------------------------------------
+send_stop:
+        ldx #STOP_CMD_LEN-1
+:       lda stop_cmd,x
+        sta input_buffer,x
+        dex
+        bpl :-
+        lda #STOP_CMD_LEN
+        sta input_len
+        jmp send_chat_packet
+
+stop_cmd:
+        .byte "/STOP"
+STOP_CMD_LEN = * - stop_cmd
 
 ;-------------------------------------------------------------------------------
 ; TCP receive callback - A2P protocol parser
@@ -2619,6 +2583,24 @@ recv_callback:
         rts
 
 @have_data:
+        ; Length $FFFF = remote end closed the connection
+        lda tcp_inbound_data_length
+        and tcp_inbound_data_length+1
+        cmp #$FF
+        bne @real_data
+        lda #0
+        sta is_connected
+        dec in_callback
+        rts
+@real_data:
+        ; Count down our own copy: IP65 adds tcp_inbound_data_length to the
+        ; ACK number after we return. (Counting down IP65's acked only the
+        ; low byte of segments of 256+ bytes - fine in Bobbin, whose virtual
+        ; TCP sends at most 160, but not with a real host's 512-536.)
+        lda tcp_inbound_data_length
+        sta rx_remaining
+        lda tcp_inbound_data_length+1
+        sta rx_remaining+1
 
         ; Reset packet count for this callback
         lda #0
@@ -2639,9 +2621,9 @@ recv_callback:
 
 @process_loop:
         ; Check if more data
-        lda tcp_inbound_data_length+1
+        lda rx_remaining+1
         bne @more
-        cpy tcp_inbound_data_length
+        cpy rx_remaining
         bcc @more
         jmp @done
 
@@ -2651,7 +2633,7 @@ recv_callback:
         iny
         bne @no_wrap
         inc src_ptr+1
-        dec tcp_inbound_data_length+1
+        dec rx_remaining+1
 @no_wrap:
 
         ; State machine - use jump table for far branches
@@ -2736,6 +2718,13 @@ recv_callback:
         eor pkt_checksum
         sta pkt_checksum
 
+        ; Garbage length would overrun pkt_buffer - resync instead
+        lda pkt_len+1
+        bne @bad_length
+        lda pkt_len
+        cmp #MAX_PKT_DATA+1
+        bcs @bad_length
+
         ; If len=0, go to checksum
         lda pkt_len
         ora pkt_len+1
@@ -2749,6 +2738,11 @@ recv_callback:
 
 @to_checksum:
         lda #STATE_CHECKSUM
+        sta recv_state
+        jmp @process_loop
+
+@bad_length:
+        lda #STATE_MAGIC_0
         sta recv_state
         jmp @process_loop
 
@@ -2802,8 +2796,6 @@ recv_callback:
 
         ; Process the packet
         jsr process_packet
-        ; DEBUG: After process_packet at $0353
-        inc $0353
 
         ; Restore callback state
         pla
@@ -2816,39 +2808,35 @@ recv_callback:
         sta src_ptr
         pla
         tay
-        ; DEBUG: After state restore at $0354
-        inc $0354
 
         ; Continue processing remaining data in this callback
-        ; (W5100 buffer fix allows safe multi-packet processing)
-        lda recv_state
-        cmp #STATE_DONE
-        beq @done            ; Don't reset if response is complete!
         lda #STATE_MAGIC_0
         sta recv_state
         jmp @process_loop    ; Process next packet in same callback
 
 @bad_checksum:
-        ; Send NACK
-        jsr send_nack
+        ; Drop it. (No NACK: tcp_send from inside the TCP callback re-enters
+        ; IP65.) TCP checks its data, so this shouldn't happen; if it does in
+        ; the middle of a program, that program must not run (handle_run)
+        lda #1
+        sta packet_lost
         lda #STATE_MAGIC_0
         sta recv_state
         jmp @process_loop
 
 @done:
-        ; DEBUG: At @done at $0356
-        inc $0356
         dec in_callback      ; Exit re-entry guard
-        ; DEBUG: After dec in_callback at $0357
-        inc $0357
         rts
 
 ;-------------------------------------------------------------------------------
 ; Process a complete packet
 ;-------------------------------------------------------------------------------
 process_packet:
-        ; DEBUG: Count process_packet calls at $0360
-        ; (debug removed)
+        lda #1
+        sta rx_any               ; the proxy is talking to us
+        lda #0
+        sta silent_frames        ; (the stall watchdog)
+        sta silent_frames+1
 
         ; Queue ACK for later (don't send from callback)
         ldx pending_ack_count
@@ -2872,7 +2860,24 @@ process_packet:
         beq @handle_error
         cmp #PKT_ACK
         beq @handle_ack
+        cmp #PKT_LOAD
+        beq @handle_load
+        cmp #PKT_DEPLOY
+        beq @handle_deploy
+        cmp #PKT_RUN
+        beq @handle_run
+        cmp #PKT_SHOW
+        beq @handle_show
         rts
+
+@handle_load:
+        jmp handle_load
+@handle_deploy:
+        jmp handle_deploy
+@handle_run:
+        jmp handle_run
+@handle_show:
+        jmp handle_show
 
 @handle_resp:
         jmp handle_response
@@ -2921,8 +2926,8 @@ handle_response:
 
         ; Final response - done
         jsr print_cr
-        lda #STATE_DONE
-        sta recv_state
+        lda #1
+        sta response_done
 
 @not_final:
         rts
@@ -2931,8 +2936,6 @@ handle_response:
 ; Handle CODE packet - store BASIC code
 ;-------------------------------------------------------------------------------
 handle_code_chunk:
-        ; DEBUG: Increment counter at $03F0 (can PEEK later - not in config area)
-        inc $03F0
 
         ; Format: offset(2) + total(2) + data
 
@@ -3003,8 +3006,7 @@ handle_code_chunk:
 
         lda #1
         sta got_code
-        lda #STATE_DONE
-        sta recv_state
+        sta response_done
         rts
 
 ;-------------------------------------------------------------------------------
@@ -3028,8 +3030,10 @@ handle_status_msg:
         cmp #'E'
         bne @not_done
         ; It's "DONE" - mark response complete
-        lda #STATE_DONE
-        sta recv_state
+        lda #1
+        sta response_done
+        ldax #msg_ready          ; show READY rather than the raw marker
+        jmp print_status
 @not_done:
 
         ; Display status on line 22 using COUT (works in --simple terminal mode)
@@ -3047,7 +3051,7 @@ handle_status_msg:
         sta CH
 
         ; Clear line
-        jsr CLREOL
+        jsr clear_eol
 
         ; Print status message via COUT
         ldy #0
@@ -3086,7 +3090,7 @@ handle_error_msg:
         jsr VTAB
         lda #0
         sta CH
-        jsr CLREOL
+        jsr clear_eol
 
         ; Print "ERROR: " prefix via COUT
         ldx #0
@@ -3249,6 +3253,13 @@ output_char:
         ; Save Y register first (all paths need it preserved)
         sty temp2            ; Use temp2 since temp1 may be used by caller
 
+        ; Form feed: a fresh page of the log (the proxy's closing card)
+        cmp #$8C
+        bne :+
+        jsr clear_output_area
+        ldy temp2
+        rts
+:
         ; Check for newline (CR or LF)
         cmp #$8D             ; CR with high bit
         beq @newline
@@ -3354,7 +3365,9 @@ do_scroll:
         lda output_row
         sta CV
         jsr VTAB
-        jsr CLREOL
+        lda #0                  ; CLREOL clears from CH on - which may be
+        sta CH                  ; wherever the status/input line left it
+        jsr clear_eol
         rts
 
 ;-------------------------------------------------------------------------------
@@ -3373,7 +3386,7 @@ show_more_prompt:
         jsr print
 
         ; Wait for any key
-        jsr RDKEY
+        jsr read_key
 
         ; Clear the [MORE] text (backspace over it)
         lda #$88             ; Backspace
@@ -3415,7 +3428,7 @@ prompt_inject:
         jsr print_status     ; "INJECT PROGRAM? (Y/N) " on status line
 
 @wait:
-        jsr RDKEY
+        jsr read_key
         and #$DF             ; Upper case
 
         cmp #'Y'
@@ -3463,50 +3476,6 @@ inject_program:
         rts
 
 ;-------------------------------------------------------------------------------
-; Show menu
-; Returns: C=1 to exit, C=0 to continue
-;-------------------------------------------------------------------------------
-show_menu:
-        jsr scroll_output
-        ldax #menu_text
-        jsr print_multiline
-
-@wait:
-        jsr RDKEY
-        and #$7F             ; Clear high bit (RDKEY sets it)
-
-        cmp #'1'
-        beq @continue
-        cmp #'2'
-        beq @clear
-        cmp #'3'
-        beq @ip
-        cmp #'4'
-        beq @exit
-        cmp #$1B             ; ESC (without high bit)
-        beq @continue
-        jmp @wait
-
-@continue:
-        clc
-        rts
-
-@clear:
-        jsr HOME
-        jsr draw_ui
-        clc
-        rts
-
-@ip:
-        jsr cmd_ip
-        clc
-        rts
-
-@exit:
-        sec
-        rts
-
-;-------------------------------------------------------------------------------
 ; Status message - position at STATUS_LINE (direct screen memory, no scroll)
 ; Line 22 screen memory = $750 (Apple II screen layout)
 ;-------------------------------------------------------------------------------
@@ -3525,7 +3494,7 @@ status_msg:
         jsr VTAB
         lda #0
         sta CH
-        jsr CLREOL
+        jsr clear_eol
         ; Restore cursor
         lda status_save_cv
         sta CV
@@ -3556,7 +3525,7 @@ print_status:
         lda #0
         sta CH
         sta status_pos
-        jsr CLREOL
+        jsr clear_eol
         ; Print string via COUT
         ldy #0
 @loop:
@@ -3721,17 +3690,20 @@ clear_output_area:
         sta output_col
         sta lines_since_pause    ; Reset pagination counter
 
-        ; Clear each line from OUTPUT_START to OUTPUT_END-1
+        ; Clear each line from OUTPUT_START to OUTPUT_END (CLREOL clears
+        ; from CH on, so whole lines need CH = 0)
+        lda #0
+        sta CH
         lda #OUTPUT_START
 @clear_loop:
         sta CV
         pha
         jsr VTAB
-        jsr CLREOL
+        jsr clear_eol
         pla
         clc
         adc #1
-        cmp #OUTPUT_END
+        cmp #OUTPUT_END+1       ; output uses row OUTPUT_END too
         bcc @clear_loop
 
         ; Position cursor at start
@@ -3775,29 +3747,7 @@ scroll_output:
         jsr VTAB
         lda #0
         sta CH               ; Start at column 0
-        jsr CLREOL
-        rts
-
-;-------------------------------------------------------------------------------
-; Print padded line (to screen width)
-;-------------------------------------------------------------------------------
-print_padded_line:
-        stax src_ptr
-        ldy #0
-@loop:
-        lda (src_ptr),y
-        beq @pad
-        jsr print_a
-        iny
-        cpy #40
-        bcc @loop
-        rts
-@pad:
-        lda #$A0             ; Space
-        jsr print_a
-        iny
-        cpy #40
-        bcc @pad
+        jsr clear_eol
         rts
 
 ;-------------------------------------------------------------------------------
@@ -3902,7 +3852,7 @@ print_decimal:
         .segment "RODATA"
 
 msg_banner:
-        .byte "APPLE II AGENT V1.0", 0
+        .byte "APPLE II AGENT V2.0", 0
 
 msg_40col:
         .byte "40-COLUMN UPPERCASE", 0
@@ -3922,9 +3872,12 @@ msg_init_net:
 msg_net_fail:
         .byte "NETWORK INIT FAILED", 0
 
+msg_net_retry:
+        .byte "CHECK THE UTHERNET II, PRESS A KEY", 0
+
 msg_installed:
-        .byte "TYPE & FROM BASIC TO RETURN", 13
-        .byte "PRESS ESC FOR MENU", 0
+        .byte "ASK FOR ANY PROGRAM. ESC OR CTRL-RESET", 13
+        .byte "BRINGS YOU BACK HERE FROM IT.", 0
 
 msg_ready:
         .byte "READY", 0
@@ -3934,6 +3887,41 @@ msg_connecting:
 
 msg_conn_fail:
         .byte "CONNECTION FAILED", 0
+
+msg_conn_lost:
+        .byte "CONNECTION LOST - TRY AGAIN", 0
+
+msg_reinit_net:
+        .byte "RESTARTING NETWORK...", 0
+
+msg_not_saved:
+        .byte "SETTINGS NOT SAVED (WRITE-PROTECTED?)", 0
+
+msg_my_address:
+        .byte "THIS APPLE II IS ", 0
+
+msg_finding:
+        .byte "LOOKING FOR THE PROXY...", 0
+
+msg_finding_status:
+        .byte "LOOKING FOR THE PROXY...", 0
+
+msg_found:
+        .byte 13, "FOUND IT: ", 0
+
+msg_not_found:
+        .byte 13, "NO ANSWER. TRYING ", 0
+
+msg_start_proxy:
+        .byte "START THE PROXY ON YOUR COMPUTER", 13
+        .byte "(./PROXY.SH START), THEN JUST TYPE.", 13
+        .byte "OR SET ITS ADDRESS: /SETIP X.X.X.X", 0
+
+; find_proxy <-> proxy/unified_proxy.py DISCOVERY_ASK / DISCOVERY_ANSWER
+discovery_ask:
+        .byte "A2AGENT?"
+discovery_answer:
+        .byte "A2AGENT!"
 
 msg_connected:
         .byte "CONNECTED", 0
@@ -3973,8 +3961,6 @@ msg_spaces_6:
 msg_current_ip:
         .byte "PROXY IP: ", 0
 
-msg_port_8080:
-        .byte "8080", 0
 
 msg_unknown_cmd:
         .byte "UNKNOWN COMMAND - TYPE /HELP", 0
@@ -3994,7 +3980,7 @@ msg_port_set:
         .byte "PORT SET: ", 0
 
 msg_invalid_port:
-        .byte "INVALID PORT - USE: /PORT 8080", 0
+        .byte "INVALID PORT - USE: /PORT 6502", 0
 
 msg_custom:
         .byte "CUSTOM", 0
@@ -4011,6 +3997,14 @@ msg_resetting:
 msg_save_failed:
         .byte "SAVE FAILED", 0
 
+msg_stopping:
+        .byte "STOPPING CLAUDE - ESC AGAIN TO GIVE UP", 0
+
+msg_gave_up:
+        .byte "STOPPED WAITING", 0
+msg_stalled:
+        .byte "NO WORD FROM THE PROXY - RECONNECTING", 0
+
 msg_model_set:
         .byte "MODEL: ", 0
 
@@ -4018,18 +4012,14 @@ msg_current_model:
         .byte "CURRENT MODEL: ", 0
 
 msg_model_options:
-        .byte "/MODEL S - SONNET (DEFAULT)", 13
-        .byte "/MODEL O - OPUS (SMARTEST)", 13
+        .byte "/MODEL O - OPUS (DEFAULT, SMARTEST)", 13
+        .byte "/MODEL S - SONNET (FASTER)", 13
         .byte "/MODEL H - HAIKU (FASTEST)", 13, 0
 
 msg_suspended:
         .byte 13
-        .byte "SUSPENDED TO BASIC.", 13
-        .byte "YOUR CODE IS LOADED - TYPE RUN", 13
-        .byte 13
-        .byte "TO RESUME: CTRL-Y OR &", 13
-        .byte "NATURAL LANGUAGE: JUST TYPE!", 13
-        .byte "ERRORS AUTO-SENT TO CLAUDE", 13, 0
+        .byte "APPLESOFT BASIC. ESC (AT THE ] PROMPT),", 13
+        .byte "& OR CTRL-Y COMES BACK TO THE AGENT.", 13, 0
 
 model_sonnet:
         .byte "SONNET", 0
@@ -4049,18 +4039,13 @@ code_prefix:
 ui_header:
         .byte "======== APPLE II AI AGENT ========", 0
 
-ui_divider:
-        .byte "----------------------------------------", 0
-
-ui_separator:
-        .byte "----------------------------------------", 0
-
 help_text:
         .byte "/HELP    - SHOW COMMANDS", 13
+        .byte "/RUN     - RUN YOUR PROGRAM (AGAIN)", 13
         .byte "/EXIT    - DROP TO BASIC", 13
         .byte "/RESET   - NEW SESSION", 13
         .byte "/PROMPT  - SET AI CONTEXT", 13
-        .byte "/DISPLAY - 40/40L/80 MODE", 13
+        .byte "/DISPLAY - 40, 40L (LOWERCASE) OR 80", 13
         .byte "/IP      - SHOW PROXY IP", 13
         .byte "/SETIP   - SET PROXY IP", 13
         .byte "/PORT    - SET PORT", 13
@@ -4068,22 +4053,10 @@ help_text:
         .byte "/MORE    - TOGGLE PAGINATION", 13
         .byte "/SAVE    - SAVE CONFIG", 13
         .byte "/CLEAR   - CLEAR SCREEN", 13
-        .byte "ESC      - MENU", 13, 0
+        .byte "ESC      - CLEAR THE LINE", 13
+        .byte "IN A PROGRAM: ESC OR CTRL-RESET", 13
+        .byte "             COMES BACK HERE", 13, 0
 
-menu_text:
-        .byte "======== MENU ========", 13
-        .byte "1. CONTINUE", 13
-        .byte "2. CLEAR SCREEN", 13
-        .byte "3. SHOW IP CONFIG", 13
-        .byte "4. EXIT TO BASIC", 13
-        .byte "CHOICE (1-4): ", 0
-
-;-------------------------------------------------------------------------------
-; Phase 2b RODATA
-;-------------------------------------------------------------------------------
-
-msg_nl_sending:
-        .byte ">> SENDING TO CLAUDE...", 0
 
 ;-------------------------------------------------------------------------------
 ; ProDOS MLI Parameter Blocks (in DATA segment - must be writable)
@@ -4182,15 +4155,37 @@ pkt_seq:        .res 1
 pkt_checksum:   .res 1
 pkt_data_pos:   .res 1
 pkt_buffer:     .res 140        ; Max packet data
+MAX_PKT_DATA    = 136           ; Longer packets are dropped (proxy sends <= 128)
 
 ; Timeouts
 timeout_lo:     .res 1
 timeout_hi:     .res 1
 
 ; Input
-input_buffer:   .res 128
+MAX_INPUT       = 239           ; as long as a ] line (GETLN)
+input_buffer:   .res MAX_INPUT+1
 input_len:      .res 1
-MAX_INPUT       = 120
+input_visible:  .res 1          ; input columns on screen (set_input_visible)
+send_attempts:  .res 1          ; send_chat retries left
+rx_remaining:   .res 2          ; recv_callback: bytes left in this segment
+response_done:  .res 1          ; a DONE / final packet arrived
+stop_requested: .res 1          ; ESC pressed once while waiting
+drain_count:    .res 1
+proxy_found:    .res 1          ; find_proxy: an answer arrived
+proxy_moved:    .res 1          ; ...with a different address or port
+discovery_tries: .res 1
+discovery_wait: .res 1
+wait_tenths:    .res 1          ; wait_key_or_timeout
+config_save_err: .res 1
+port_x2:        .res 2          ; cmd_port: port * 2
+new_ip:         .res 4          ; cmd_setip: the address being parsed
+rx_any:         .res 1          ; a packet arrived since the last send
+silent_frames:  .res 2          ; frames since the last packet (stall watchdog)
+silence_limit:  .res 2          ; ...when it's a stall (CONFIG_WATCHDOG * 60)
+temp_w:         .res 2
+vbl_prev:       .res 1
+resync_tries:   .res 1
+packet_lost:    .res 1          ; a packet failed its checksum since the DEPLOY
 
 ; Code handling
 expecting_code: .res 1
@@ -4208,6 +4203,7 @@ send_buffer:    .res 256
 parse_value:    .res 1
 port_lo:        .res 1
 port_hi:        .res 1
+port_str:       .res 6
 
 ; Callback re-entry guard
 in_callback:       .res 1       ; Non-zero if inside recv_callback
@@ -4226,22 +4222,14 @@ ack_batch_count:   .res 1       ; Number of ACKs to send in batch
 ack_batch_pos:     .res 1       ; Current position in batch buffer
 ack_batch_buffer:  .res 64      ; Buffer for up to 8 ACK packets (8 bytes each)
 
-; Phase 2b: ROM patch / error intercept state
-error_intercept_flag: .res 1    ; 1 = immediate-mode error intercepted
-kbd_stuff_state:   .res 1       ; KSWL hook state (0=send &, 1=send CR)
-program_error_flag: .res 1      ; 1 = program error, auto-invoke agent
-poll_counter_lo:    .res 1      ; Network poll timing (low byte)
-poll_counter_hi:    .res 1      ; Network poll timing (high byte)
-saved_kswl:        .res 1       ; Original keyboard vector (low)
-saved_kswh:        .res 1       ; Original keyboard vector (high)
-orig_err_byte0:    .res 1       ; Saved byte from $D412
-orig_err_byte1:    .res 1       ; Saved byte from $D413
-orig_err_byte2:    .res 1       ; Saved byte from $D414
-saved_input_buf:   .res 128     ; Saved copy of $200 input buffer
-saved_input_len:   .res 1       ; Length of saved input
-
 ; ProDOS I/O buffer (must be page-aligned, 1024 bytes)
 ; Placed in separate IOBUF segment to ensure alignment
         .segment "IOBUF"
 io_buffer:      .res 1024
         .segment "BSS"
+
+;===============================================================================
+; Deploy / launch / return (program runner)
+;===============================================================================
+.include "agent_deploy.s"
+.include "agent_screen.s"
