@@ -1279,7 +1279,7 @@ cmd_code:
 
 ;-------------------------------------------------------------------------------
 ; Command: /SETIP <ip>
-; Format: /SETIP 192.168.1.50
+; Format: /SETIP 192.168.1.100
 ;-------------------------------------------------------------------------------
 cmd_setip:
         ; Skip "/SETIP "
@@ -4095,7 +4095,7 @@ msg_ip_set:
         .byte "IP SET: ", 0
 
 msg_invalid_ip:
-        .byte "INVALID IP - USE: /SETIP 192.168.1.50", 0
+        .byte "INVALID IP - USE: /SETIP 192.168.1.100", 0
 
 msg_port_set:
         .byte "PORT SET: ", 0
