@@ -14,6 +14,7 @@ bobbin/src/roms/
 disks/*.dsk
 !disks/ProDOS_2_4.dsk
 !disks/agent_contiguous.dsk
+!disks/base_jan19.dsk
 
 # Python
 __pycache__/

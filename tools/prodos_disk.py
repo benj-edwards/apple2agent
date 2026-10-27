@@ -131,10 +131,9 @@ class ProDOSDisk:
         """Create a volume bitmap."""
         bitmap = bytearray(BLOCK_SIZE)
 
-        # Initialize all blocks as free (1)
-        for i in range(total_blocks // 8 + 1):
-            if i < BLOCK_SIZE:
-                bitmap[i] = 0xFF
+        # Initialize the blocks that exist as free (1); bits past the end stay 0
+        for block in range(min(total_blocks, BLOCK_SIZE * 8)):
+            bitmap[block // 8] |= 0x80 >> (block % 8)
 
         # Mark used blocks as used (0)
         for block in used_blocks:

@@ -2,11 +2,15 @@
 """
 Make Agent Disk - Create a contiguous, bootable agent disk
 
+WARNING: disks built this way (from scratch, ProDOS 2.4 kernel) boot in Bobbin
+but crashed a real Apple IIe at 2002-. The agent disk comes from
+tools/build_agent_disk.py (`make disk`); this is kept for tools/make_diag_disk.py.
+
 Creates a fresh ProDOS disk with files allocated contiguously,
 verifies the structure, and optionally tests booting in the emulator.
 
 Usage:
-    python3 make_agent_disk.py [output.dsk] [--test]
+    python3 make_agent_disk.py [output.dsk] [--test] [--kernel other.dsk]
 """
 
 import sys
@@ -131,7 +135,7 @@ def get_file_blocks(disk_data, prodos_name, prodos_order=False):
 
 
 def extract_file(disk_data, prodos_name, prodos_order=False):
-    """Extract a file's contents from disk."""
+    """Extract a file's contents from disk, exactly as ProDOS READ returns them."""
     info = get_file_blocks(disk_data, prodos_name, prodos_order)
     if not info:
         return None, None
@@ -146,7 +150,12 @@ def extract_file(disk_data, prodos_name, prodos_order=False):
         while remaining > 0:
             data_block = index_data[i] | (index_data[256 + i] << 8)
             chunk_size = min(BLOCK_SIZE, remaining)
-            data.extend(read_block(disk_data, data_block, prodos_order)[:chunk_size])
+            if data_block == 0:
+                # Sparse block: ProDOS reads it as zeros. (Block 0 is the boot
+                # loader - reading it here once put boot code into PRODOS.)
+                data.extend(bytes(chunk_size))
+            else:
+                data.extend(read_block(disk_data, data_block, prodos_order)[:chunk_size])
             remaining -= chunk_size
             i += 1
     else:
@@ -187,16 +196,11 @@ def create_fresh_prodos_disk(volume_name="AGENT"):
         db[2:4] = struct.pack('<H', block + 1 if block < 5 else 0)
         write_block(disk_data, block, db)
 
-    # Block 6: Volume bitmap
+    # Block 6: Volume bitmap - a set bit is a free block. Only blocks that
+    # exist (0-279) may be marked; blocks 0-6 are boot, directory and bitmap.
     bitmap = bytearray(BLOCK_SIZE)
-    for i in range(NUM_BLOCKS // 8 + 1):
-        if i < BLOCK_SIZE:
-            bitmap[i] = 0xFF
-    # Mark blocks 0-6 as used
-    for block in range(7):
-        byte_idx = block // 8
-        bit_idx = 7 - (block % 8)
-        bitmap[byte_idx] &= ~(1 << bit_idx)
+    for block in range(7, NUM_BLOCKS):
+        bitmap[block // 8] |= 0x80 >> (block % 8)
     write_block(disk_data, 6, bitmap)
 
     return disk_data
@@ -211,6 +215,9 @@ def add_file_contiguous(disk_data, file_data, prodos_name, file_type, aux_type, 
     blocks_needed = (file_size + BLOCK_SIZE - 1) // BLOCK_SIZE
     if blocks_needed == 0:
         blocks_needed = 1
+    if blocks_needed > 256:
+        print(f"  Error: {prodos_name} needs a tree file (over 128K) - not supported")
+        return False, []
 
     # Find contiguous free blocks
     block2 = read_block(disk_data, 2, prodos_order)
@@ -364,6 +371,45 @@ def verify_contiguous(disk_data, prodos_name, prodos_order=False):
     return True, f"Contiguous: blocks {blocks[0]}-{blocks[-1]}"
 
 
+def verify_disk(disk_data, template_data, expected):
+    """Read the finished image back the way ProDOS would and check every byte.
+
+    expected: {prodos_name: file bytes}. Returns a list of problems (empty = good).
+    """
+    problems = []
+
+    for n in (0, 1):
+        if read_block(disk_data, n) != read_block(template_data, n):
+            problems.append(f"boot block {n} differs from the template")
+
+    used = set(range(7))
+    for name, want in expected.items():
+        got, info = extract_file(disk_data, name)
+        if got is None:
+            problems.append(f"{name}: missing")
+            continue
+        if got != want:
+            first = next((i for i in range(min(len(got), len(want))) if got[i] != want[i]), min(len(got), len(want)))
+            problems.append(f"{name}: reads back wrong ({len(got)} vs {len(want)} bytes, first difference at {first})")
+        if 0 in info['blocks']:
+            problems.append(f"{name}: has a sparse block (pointer 0)")
+        used.update(info['blocks'])
+
+    vdh = read_block(disk_data, 2)
+    if struct.unpack('<H', vdh[0x25:0x27])[0] != len(expected):
+        problems.append("volume file count is wrong")
+    bitmap = read_block(disk_data, struct.unpack('<H', vdh[0x27:0x29])[0])
+    for block in range(len(bitmap) * 8):
+        free = bool(bitmap[block // 8] & (0x80 >> (block % 8)))
+        if block >= NUM_BLOCKS:
+            if free:
+                problems.append(f"bitmap marks nonexistent block {block} free")
+                break
+        elif free == (block in used):
+            problems.append(f"bitmap says block {block} is {'free' if free else 'used'}, but it is {'used' if free else 'not used'}")
+    return problems
+
+
 def list_files(disk_data, prodos_order=False):
     """List files on disk with their block allocation."""
     files = []
@@ -399,89 +445,75 @@ def list_files(disk_data, prodos_order=False):
     return files
 
 
-def test_boot(disk_path, timeout=10):
-    """Test booting the disk in Bobbin emulator."""
-    bobbin_path = os.path.join(os.path.dirname(__file__), '..', 'bobbin', 'src', 'bobbin')
-    socket_path = '/tmp/bobbin_test.sock'
+def test_boot(disk_path, timeout=30):
+    """Boot the disk in Bobbin and wait for the agent's banner.
 
+    Passes only when AGENT.SYSTEM actually starts. (This proves the image is
+    good for Bobbin; real hardware can still differ.)
+    """
+    import json
+    import socket
+
+    bobbin_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'bobbin', 'src', 'bobbin')
     if not os.path.exists(bobbin_path):
         print(f"  Bobbin not found at {bobbin_path}")
         return False
 
-    # Remove old socket
-    if os.path.exists(socket_path):
-        os.remove(socket_path)
+    # Unix socket paths max out at 104 chars on macOS: keep it short
+    work = tempfile.mkdtemp(prefix='a2disk', dir='/tmp')
+    socket_path = os.path.join(work, 'b.sock')
 
-    # Start emulator
+    # stdin=PIPE: --simple sets stdin O_NONBLOCK, which must never hit ours
     proc = subprocess.Popen([
         bobbin_path, '--simple', '--remain',
         '--control-socket', socket_path,
         '-m', 'enhanced',
         '--disk', disk_path
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    ], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    # Wait for boot
-    time.sleep(3)
-
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(5)
+    screen_text = ''
     try:
-        # Connect to control socket
-        import socket
-        import json
-
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(5)
-
-        connected = False
-        for _ in range(20):
+        for _ in range(50):
             try:
                 sock.connect(socket_path)
-                connected = True
                 break
-            except:
-                time.sleep(0.25)
-
-        if not connected:
+            except OSError:
+                time.sleep(0.1)
+        else:
             print("  Failed to connect to emulator")
-            proc.kill()
             return False
 
-        # Read screen
-        sock.send(b'{"cmd":"screen"}\n')
-        response = b''
-        while b'\n' not in response:
-            response += sock.recv(4096)
-
-        data = json.loads(response.decode())
-        lines = data.get('lines', [])
-
-        # Check for ProDOS or BASIC prompt
-        screen_text = '\n'.join(lines)
-
-        if 'UNABLE' in screen_text or 'ERROR' in screen_text:
-            print("  Boot failed - disk error")
-            sock.send(b'{"cmd":"quit"}\n')
-            sock.close()
-            proc.wait(timeout=5)
-            return False
-
-        if ']' in screen_text or 'PRODOS' in screen_text.upper() or 'BASIC' in screen_text.upper():
-            print("  Boot successful!")
-            sock.send(b'{"cmd":"quit"}\n')
-            sock.close()
-            proc.wait(timeout=5)
-            return True
-
-        print("  Boot result unclear")
-        print(f"  Screen: {screen_text[:200]}")
-        sock.send(b'{"cmd":"quit"}\n')
-        sock.close()
-        proc.wait(timeout=5)
-        return True
-
+        reader = sock.makefile('r')
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            sock.sendall(b'{"cmd":"screen"}\n')
+            screen_text = '\n'.join(json.loads(reader.readline()).get('lines', []))
+            if 'APPLE II AGENT' in screen_text:
+                print("  Agent started")
+                return True
+            if 'UNABLE' in screen_text or 'ERR' in screen_text or 'TOO LARGE' in screen_text:
+                break
+            time.sleep(0.5)
+        print("  Agent never started. Screen:")
+        for line in screen_text.splitlines():
+            if line.strip():
+                print("   |" + line.rstrip())
+        return False
     except Exception as e:
         print(f"  Boot test error: {e}")
-        proc.kill()
         return False
+    finally:
+        sock.close()
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        if os.path.exists(socket_path):
+            os.remove(socket_path)
+        os.rmdir(work)
 
 
 def main():
@@ -491,10 +523,15 @@ def main():
     # Parse args
     output_path = os.path.join(project_dir, 'disks', 'agent_contiguous.dsk')
     test_boot_flag = False
+    kernel_disk = None              # take PRODOS from this disk instead
 
-    for arg in sys.argv[1:]:
+    args = sys.argv[1:]
+    while args:
+        arg = args.pop(0)
         if arg == '--test':
             test_boot_flag = True
+        elif arg == '--kernel' and args:
+            kernel_disk = args.pop(0)
         elif arg == '--help':
             print(__doc__)
             sys.exit(0)
@@ -503,7 +540,7 @@ def main():
 
     # Source files - use ProDOS 2.4 master for boot blocks and system files
     template_disk = os.path.join(project_dir, 'disks', 'ProDOS_2_4.dsk')
-    agent_bin = os.path.join(project_dir, 'build', 'AGENT.BIN')
+    agent_bin = os.path.join(project_dir, 'build', 'AGENT.SYSTEM')
 
     print("=" * 60)
     print("Make Agent Disk - Contiguous Allocation")
@@ -526,7 +563,12 @@ def main():
 
     # Extract system files from template
     print("\n2. Extracting system files...")
-    prodos_data, prodos_info = extract_file(template_data, "PRODOS")
+    kernel_data = template_data
+    if kernel_disk:
+        with open(kernel_disk, 'rb') as f:
+            kernel_data = bytearray(f.read())
+        print(f"   PRODOS from {kernel_disk}")
+    prodos_data, prodos_info = extract_file(kernel_data, "PRODOS")
     if prodos_data:
         print(f"   PRODOS: {len(prodos_data)} bytes")
     else:
@@ -540,31 +582,10 @@ def main():
         print("   Error: Could not extract BASIC.SYSTEM")
         sys.exit(1)
 
-    # Load agent binary
+    # Load agent (ProDOS boots the first *.SYSTEM file: the agent itself)
     with open(agent_bin, 'rb') as f:
         agent_data = f.read()
-    print(f"   AGENT.BIN: {len(agent_data)} bytes")
-
-    # Create STARTUP program (auto-runs AGENT.BIN)
-    # Tokenized: 10 PRINT CHR$(4);"BRUN AGENT.BIN"
-    # Generated by basic_tokenizer_streaming.tokenize_program()
-    startup_tokens = bytearray([
-        0x1C, 0x08,  # Next line pointer
-        0x0A, 0x00,  # Line number 10
-        0xBA,        # PRINT token
-        0xE7,        # CHR$ token
-        0x28,        # (
-        0x34,        # 4
-        0x29,        # )
-        0x3B,        # ;
-        0x22,        # "
-        0x42, 0x52, 0x55, 0x4E, 0x20,  # BRUN
-        0x41, 0x47, 0x45, 0x4E, 0x54, 0x2E, 0x42, 0x49, 0x4E,  # AGENT.BIN
-        0x22,        # "
-        0x00,        # End of line
-        0x00, 0x00   # End of program
-    ])
-    print(f"   STARTUP: {len(startup_tokens)} bytes (auto-run)")
+    print(f"   AGENT.SYSTEM: {len(agent_data)} bytes")
 
     # Create fresh disk
     print("\n3. Creating fresh ProDOS disk...")
@@ -577,31 +598,43 @@ def main():
     # Add files in order (contiguous allocation)
     print("\n4. Adding files with contiguous allocation...")
 
-    success, blocks = add_file_contiguous(disk_data, prodos_data, "PRODOS", FILETYPE_SYS, 0x0000)
-    print(f"   PRODOS: blocks {blocks[0]}-{blocks[-1] if blocks else 'N/A'}")
-
-    success, blocks = add_file_contiguous(disk_data, basic_data, "BASIC.SYSTEM", FILETYPE_SYS, 0x2000)
-    print(f"   BASIC.SYSTEM: blocks {blocks[0]}-{blocks[-1] if blocks else 'N/A'}")
-
-    success, blocks = add_file_contiguous(disk_data, agent_data, "AGENT.BIN", FILETYPE_BIN, 0x6000)
-    print(f"   AGENT.BIN: blocks {blocks[0]}-{blocks[-1] if blocks else 'N/A'}")
-
-    success, blocks = add_file_contiguous(disk_data, bytes(startup_tokens), "STARTUP", FILETYPE_BAS, 0x0801)
-    print(f"   STARTUP: blocks {blocks[0]}-{blocks[-1] if blocks else 'N/A'}")
+    # Order matters: ProDOS boots the first *.SYSTEM file, so AGENT.SYSTEM
+    # must come before BASIC.SYSTEM (kept for plain ProDOS BASIC: -BASIC.SYSTEM)
+    files = [("PRODOS", prodos_data, 0x0000),
+             ("AGENT.SYSTEM", agent_data, 0x2000),
+             ("BASIC.SYSTEM", basic_data, 0x2000)]
+    for name, data, aux in files:
+        success, blocks = add_file_contiguous(disk_data, data, name, FILETYPE_SYS, aux)
+        if not success:
+            print(f"   Error: could not add {name}")
+            sys.exit(1)
+        print(f"   {name}: blocks {blocks[0]}-{blocks[-1]}")
 
     # Verify contiguous allocation
     print("\n5. Verifying contiguous allocation...")
-    for name in ["PRODOS", "BASIC.SYSTEM", "AGENT.BIN", "STARTUP"]:
+    for name, _, _ in files:
         ok, msg = verify_contiguous(disk_data, name)
         status = "OK" if ok else "FAIL"
         print(f"   {name}: {status} - {msg}")
+        if not ok:
+            sys.exit(1)
+
+    # Read everything back the way ProDOS will and compare byte for byte
+    print("\n   Reading the image back...")
+    problems = verify_disk(disk_data, template_data, {name: data for name, data, _ in files})
+    for p in problems:
+        print(f"   FAIL: {p}")
+    if problems:
+        print("   Disk NOT saved.")
+        sys.exit(1)
+    print("   Boot blocks, every file byte and the volume bitmap check out")
 
     # List files
     print("\n6. Disk catalog:")
-    files = list_files(disk_data)
+    catalog = list_files(disk_data)
     print("   NAME            TYPE  BLOCKS  SIZE     KEY")
     print("   " + "-" * 50)
-    for f in files:
+    for f in catalog:
         type_names = {0x06: 'BIN', 0xFC: 'BAS', 0xFF: 'SYS'}
         type_str = type_names.get(f['type'], f"${f['type']:02X}")
         print(f"   {f['name']:15} {type_str:4}  {f['blocks']:5}  {f['size']:7}  {f['key']}")
@@ -619,6 +652,7 @@ def main():
             print("   Boot test PASSED")
         else:
             print("   Boot test FAILED")
+            sys.exit(1)
 
     print("\n" + "=" * 60)
     print("Done!")
