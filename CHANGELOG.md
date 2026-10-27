@@ -71,6 +71,7 @@ The first boots on a real //e (Floppy Emu) crashed into the monitor at `2002-`: 
 
 - **`make_agent_disk.py` corrupted the ProDOS kernel**: it read a sparse index entry (pointer 0) as block 0, so the last 232 bytes of PRODOS were boot-block code instead of zeros. It also marked nonexistent blocks 280-287 free. It now reads the finished image back and compares every file byte, the boot blocks and the bitmap before saving.
 
+
 ### Bobbin
 
 - Control-socket breakpoints work; `$C019` vertical blank; virtual UDP (service discovery); the virtual TCP behaves like a real host (536-byte segments, honors the Apple's window, resends from its ACK, drops duplicates); `BOBBIN_U2_RESET_ON_RESET=1`; `BOBBIN_U2_UDP_PORT=n` (the virtual network's UDP goes to localhost:n). See Bobbin's changelog.

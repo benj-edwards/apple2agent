@@ -253,7 +253,7 @@ Every token through the Claude API costs money and adds latency. Several changes
 - **DHGR 16-color capture** — Bobbin's DHGR (double hi-res) export was monochrome only. Added full 16-color support: extract 4-bit color pixels from interleaved aux/main memory, render at 140x192 scaled to 560x192. Changes spanned Bobbin C code, the control socket protocol, the Python client, and the MCP server.
 - **6502/Apple II reference library** — seven comprehensive reference files (3,006 lines total): 6502 instruction set, ca65 assembler, ld65 linker, ProDOS MLI, soft switches, memory map, ROM routines
 - **Auto-scaled PNG screenshots** — all PNG captures are scaled 3x with nearest-neighbor interpolation. Apple II native resolutions (280x192 for HGR) are too small for AI vision models to parse details. 3x makes them 840x576, much more readable.
-- **Public release preparation** — cleaned sensitive files from git history, rewrote README, pushed to GitHub
+- **Public release preparation** — rewrote the README and pushed to GitHub
 
 ---
 

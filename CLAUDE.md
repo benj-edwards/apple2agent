@@ -18,15 +18,6 @@ When making changes to Bobbin, edit the canonical source and rebuild, then copy 
 - Support other agents/projects that depend on Bobbin or the MCP server
 - Maintain the 6502/Apple II reference library (`library/`)
 
-## Git Identity
-
-For all commits, use this identity:
-
-```
-git config user.name "<your name>"
-git config user.email "<your email>"
-```
-
 ## PRIMARY DIRECTIVE
 
 **AGENTIC SOFTWARE DEVELOPMENT FOR APPLE II**
@@ -301,8 +292,8 @@ python3 tools/build_agent_disk.py [output.dsk] [--test]
 
 **A real //e (enhanced, Floppy Emu) crashed at `2002-` on disks with the ProDOS 2.4 kernel** (`disks/ProDOS_2_4.dsk`, the first 2.4 release), even the stock 2.4 disk, and on disks built from scratch by `tools/make_agent_disk.py`. Bobbin boots all of them. The disk that boots it is the January one (ProDOS 1.9 + BASIC.SYSTEM, made with AppleCommander), so:
 
-- `disks/base_jan19.dsk` = that January disk with the old agent files deleted.
-- `tools/build_agent_disk.py` copies it and adds `AGENT.SYSTEM` with **AppleCommander** (`tools/ac.jar` or `$AC_JAR`), checks that AGENT.SYSTEM is the first `.SYSTEM` entry and reads back exactly, and boot-tests it.
+- `disks/base_jan19.dsk` = that January disk with the old agent files deleted and its unused blocks zeroed.
+- `tools/build_agent_disk.py` copies it and adds `AGENT.SYSTEM` with **AppleCommander** (`tools/ac.jar` or `$AC_JAR`; not in git), checks that AGENT.SYSTEM is the first `.SYSTEM` entry and reads back exactly, and boot-tests it.
 - `src/apple2_mcp/README.md` ("Disk Images - The Big Gotchas") says the same: never write ProDOS structures by hand. `make_agent_disk.py` / `make_diag_disk.py` still do (diag disk only).
 
 ### File Types
@@ -333,7 +324,7 @@ python3 tools/copy_to_card.py disks/agent_contiguous.dsk "/Volumes/<card>/<folde
 sudo python3 tools/fat_check.py "/Volumes/<card>" "<folder>/Apple II Agent.dsk"   # sudo: the user runs this one
 ```
 
-(`disks/agent_diag.dsk` is built from scratch with ProDOS 2.4 and crashes on the real machine.)
+`disks/agent_diag.dsk` is built from scratch with ProDOS 2.4 and crashes on the real machine.
 
 ### Rebuilding Agent Disk
 
@@ -430,7 +421,7 @@ BOBBIN_U2_RESET_ON_RESET=1 .venv/bin/python tests/e2e_agent.py           # Uther
 
 All automated tests pass (display, first-run setup, e2e at turbo and real speed, with and without a Uthernet reset on Ctrl-Reset, 25-cycle soak). Live Claude runs: times table, hi-res breakout (machine code), lo-res snake (machine code), Applesoft hi-res sketch, ESC-to-stop + follow-up request. 80 columns works (the agent draws it itself, `asm/agent_screen.s`; programs start in 40 and the agent comes back in 80).
 
-Real hardware (2026-10-23): **the agent boots on a real enhanced //e (Floppy Emu, Uthernet II), finds the proxy and chats with Claude.** Every earlier disk crashed at `2002-`: they all had the ProDOS 2.4 kernel (the stock 2.4 disk crashes too). The disk is now built from a January ProDOS 1.9 disk (see "The boot disk" above). Not yet tried on the real machine: a deploy and a program run, 80 columns.
+Real hardware (2026-10-23): **the agent boots on a real enhanced //e (Floppy Emu, Uthernet II), finds the proxy and chats with Claude.** Every earlier disk crashed at `2002-`: they all had the ProDOS 2.4 kernel (the stock 2.4 disk crashes too). The disk is now built from a January ProDOS 1.9 disk (see "The boot disk" above). 2026-10-26: a deploy and a program run work there too (Claude built TriPeaks and it was played on the real machine; the stall watchdog reconnected twice during the build). Not yet confirmed on the real machine: 80 columns.
 
 Port: **6502** everywhere (8080 is often taken).
 
