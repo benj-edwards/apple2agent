@@ -219,7 +219,8 @@ class BobbinControlSocket:
         """Get CPU register state.
 
         Returns:
-            Dict with pc, a, x, y, sp, p, cycles, instructions, frames
+            Dict with pc, a, x, y, sp, p, cycles, instructions, frames,
+            paused, break_hit (breakpoint id that paused it, or -1)
         """
         return self.send_command({"cmd": "cpu"})
 

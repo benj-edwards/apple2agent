@@ -57,7 +57,7 @@ def status() -> dict:
     }
 
 
-def start(host: str = '0.0.0.0', port: int = 8080) -> dict:
+def start(host: str = '0.0.0.0', port: int = 6502) -> dict:
     """Start the proxy server."""
     if is_running():
         return {"success": False, "error": "Proxy is already running", "pid": get_pid()}
@@ -81,6 +81,7 @@ def start(host: str = '0.0.0.0', port: int = 8080) -> dict:
     with open(LOG_FILE, 'w') as log:
         proc = subprocess.Popen(
             ['python3', '-u', str(PROXY_SCRIPT), '--host', host, '--port', str(port)],
+            stdin=subprocess.DEVNULL,  # never share the MCP server's JSON-RPC stdin
             stdout=log,
             stderr=subprocess.STDOUT,
             start_new_session=True,

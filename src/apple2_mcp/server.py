@@ -1056,8 +1056,8 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "port": {
                         "type": "integer",
-                        "default": 8080,
-                        "description": "Port to listen on (default: 8080)"
+                        "default": 6502,
+                        "description": "Port to listen on (default: 6502)"
                     }
                 }
             }
@@ -2214,7 +2214,7 @@ RESULT_BTN = $0304
 
     # --- Proxy Control ---
     elif name == "proxy_start":
-        port = args.get("port", 8080)
+        port = args.get("port", 6502)
         result = proxy_control.start(port=port)
         if result["success"]:
             return f"Proxy started (PID: {result['pid']}, port: {result['port']})\nLog: {result['log_file']}"
