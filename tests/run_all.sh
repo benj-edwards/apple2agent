@@ -10,7 +10,7 @@ run $PY tests/e2e_display.py
 run $PY tests/e2e_setup.py
 run $PY tests/e2e_agent.py
 run env E2E_DISPLAY=80 $PY tests/e2e_agent.py
-run env BOBBIN_U2_CORRUPT_EVERY=5 $PY tests/e2e_agent.py   # a flaky bus: every 5th TCP segment garbled
+run env BOBBIN_U2_CORRUPT_EVERY=5 BOBBIN_U2_CORRUPT_LEN_EVERY=7 $PY tests/e2e_agent.py   # a flaky bus: garbled segments, misread frame lengths
 run $PY tests/soak_agent.py 25
 [ "$1" = "--real-speed" ] && run env E2E_REAL_SPEED=1 $PY tests/e2e_agent.py
 exit $status

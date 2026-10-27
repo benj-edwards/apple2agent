@@ -514,7 +514,8 @@ class AppleIISession:
         # the Apple II sends /STOP while it waits. Busy lives on the shared
         # agent: after a reconnect the old request may still be running.
         agent = self._agent()
-        if message.upper() == '/RESYNC':
+        if message.upper().startswith('/RESYNC'):
+            self._log_stall_report(message[len('/RESYNC'):])
             self._handle_resync()
             return
         if agent and agent.busy:
@@ -684,6 +685,37 @@ class AppleIISession:
         self._send_status("RESTORING PREVIOUS VERSION...")
         self.deploy_program(program)
         self._send_response(f"RESTORED {program.name.upper()}")
+
+    STALL_FIELDS = {
+        "N": "segments since the last good packet", "T": "TCP segments in all",
+        "B": "...with a bad checksum", "H": "W5100 RX ring skips (bad frame header)",
+        "A": "A2P packets with a bad checksum", "S": "W5100 socket 0 status",
+        "Q": "bytes waiting in the W5100 RX ring", "E": "seq expected (low 16)",
+        "L": "seq last received (low 16)",
+    }
+
+    def _log_stall_report(self, report: str):
+        """The Apple II's own view of a stall (asm/agent.s build_stall_report),
+        appended to logs/stall_reports.log: it outlives proxy restarts."""
+        fields = dict(f.split("=", 1) for f in report.upper().split() if "=" in f)
+        lines = [f"{time.strftime('%Y-%m-%d %H:%M:%S')} stall reported by {self.addr[0]}"]
+        for key, label in self.STALL_FIELDS.items():
+            if key in fields:
+                try:
+                    lines.append(f"  {key}={fields[key]:>4} ({int(fields[key], 16)})  {label}")
+                except ValueError:
+                    lines.append(f"  {key}={fields[key]}  {label}")
+        if not fields:
+            lines.append("  (no report: an older client)")
+        text = "\n".join(lines)
+        print(f"[Resync] {text}")
+        try:
+            log_dir = Path(os.environ.get("APPLE2_LOG_DIR") or Path(__file__).resolve().parent.parent / "logs")
+            log_dir.mkdir(exist_ok=True)
+            with open(log_dir / "stall_reports.log", "a") as f:
+                f.write(text + "\n")
+        except OSError as e:
+            print(f"[Resync] couldn't write the report: {e}")
 
     def _handle_resync(self):
         """/RESYNC - the Apple II's watchdog reconnected after its connection

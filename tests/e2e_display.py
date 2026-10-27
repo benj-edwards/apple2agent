@@ -94,7 +94,7 @@ class FakeProxy(threading.Thread):
                     elif chat.startswith("STALL"):
                         conn.sendall(proto.encode_response("BEFORE THE STALL\n", is_final=False))
                         # ...then silence, with the connection left open
-                    elif chat == "/RESYNC":
+                    elif chat.startswith("/RESYNC"):
                         conn.sendall(proto.encode_response("RESYNCED\n", is_final=False))
                         conn.sendall(proto.encode_status("DONE"))
                     elif chat.startswith("HANG"):
@@ -178,8 +178,12 @@ def run(mode):
         if mode == "watchdog":
             s.inject_keys("STALL\r")
             ok = wait_for("RESYNCED", 90)
+            reports = [c for c in proxy.chats if c.startswith("/RESYNC")]
             check("a reply that goes silent: the watchdog reconnects and asks for /RESYNC",
-                  ok and "/RESYNC" in proxy.chats, "\n".join(rows()) + f"\nchats: {proxy.chats}")
+                  ok and reports, "\n".join(rows()) + f"\nchats: {proxy.chats}")
+            fields = dict(f.split("=") for f in reports[0].split()[1:]) if reports else {}
+            check("...with its report of the stall", set(fields) == set("NTBHASQEL") and
+                  all(len(v) in (2, 4) for v in fields.values()), reports)
             time.sleep(2)
             check("...and the wait ends normally", any(r.startswith("AGENT>") for r in rows()) and
                   not any("CONNECTION LOST" in r for r in rows()), "\n".join(rows()))

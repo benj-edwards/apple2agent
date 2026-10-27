@@ -53,3 +53,22 @@ def test_resync_while_claude_works_takes_over_the_session():
     s._handle_resync()
     assert s.sent == [("status", "RECONNECTED - STILL WORKING")]
     assert agent.session is s and agent._resynced is True
+
+
+def test_the_stall_report_is_decoded_and_logged(tmp_path, monkeypatch):
+    monkeypatch.setenv("APPLE2_LOG_DIR", str(tmp_path))
+    s = make_session(make_agent())
+    s.addr = ("192.168.1.150", 1234)
+    s._log_stall_report(" N=0005 T=1A2B B=0003 H=0001 A=00 S=42 Q=0000 E=12AB L=12AB")
+    log = (tmp_path / "stall_reports.log").read_text()
+    assert "stall reported by 192.168.1.150" in log
+    assert "B=0003 (3)  ...with a bad checksum" in log
+    assert "S=  42 (66)  W5100 socket 0 status" in log
+
+
+def test_an_old_client_resync_has_no_report(tmp_path, monkeypatch):
+    monkeypatch.setenv("APPLE2_LOG_DIR", str(tmp_path))
+    s = make_session(make_agent())
+    s.addr = ("10.0.0.2", 1)
+    s._log_stall_report("")
+    assert "(no report: an older client)" in (tmp_path / "stall_reports.log").read_text()

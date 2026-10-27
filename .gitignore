@@ -51,6 +51,9 @@ OLDDOCS/
 # Backup archives
 *.zip
 
+# The proxy's stall reports from the Apple II
+logs/
+
 # Scratch files
 programs/current.bas
 
