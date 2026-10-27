@@ -51,14 +51,19 @@ OLDDOCS/
 # Backup archives
 *.zip
 
+# AppleCommander (make disk): put your own copy here
+tools/ac.jar
+
 # The proxy's stall reports from the Apple II
 logs/
 
 # Scratch files
 programs/current.bas
 
-# Claude artifacts
+# Claude artifacts, and this machine's own Claude Code setup
 .claude/
+CLAUDE.local.md
+.mcp.json
 
 # Environment files (API keys)
 .env

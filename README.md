@@ -163,7 +163,7 @@ ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
 
 ## Testing with the Emulator Only
 
-No hardware needed. With Claude Code and the apple2-mcp server:
+No hardware needed. With Claude Code and the apple2-mcp server (copy `.mcp.json.example` to `.mcp.json` and fill in where this repo is):
 
 ```
 boot(machine="enhanced", uthernet2=true, disk="disks/agent_contiguous.dsk", wait_for_prompt=false)
