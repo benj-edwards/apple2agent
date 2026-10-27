@@ -20,6 +20,10 @@ Message Types:
   0x04 - STATUS: Status message
   0x05 - ACK: Acknowledgment
   0x06 - NACK: Request retransmit
+  0x07 - LOAD: Program bytes - addr(2) + data (proxy -> Apple II)
+  0x08 - DEPLOY: Begin a program/preview transfer - mode(1) + purpose(1)
+  0x09 - RUN: Program complete - launch descriptor (see deploy.py)
+  0x0A - SHOW: Display mode - 0 = text, 1 = HGR preview
   0x0F - ERR: Error message
 
 Usage:
@@ -50,7 +54,10 @@ class PacketType(IntEnum):
     STATUS = 0x04  # Status message
     ACK = 0x05     # Acknowledgment
     NACK = 0x06    # Request retransmit
-    BINARY = 0x07  # Machine code binary chunk
+    LOAD = 0x07    # Program bytes at an address
+    DEPLOY = 0x08  # Begin program/preview transfer
+    RUN = 0x09     # Program ready - launch descriptor
+    SHOW = 0x0A    # Text / HGR preview display
     SUSPEND = 0x10 # Suspend to BASIC/ProDOS
     RESUME = 0x11  # Resume from suspend
     ERR = 0x0F     # Error message
@@ -61,12 +68,21 @@ CAP_40_COL = 0x00      # 40-column display
 CAP_80_COL = 0x01      # 80-column display
 CAP_LOWERCASE = 0x02   # Supports lowercase
 CAP_MOUSE = 0x04       # Has mouse card
+CAP_AUX_RAM = 0x08     # 128K //e - aux memory available (EXCHANGE launches)
+CAP_DEPLOY = 0x10      # Client understands DEPLOY/LOAD/RUN/SHOW
+
+# DEPLOY packet values
+DEPLOY_MAIN = 0        # LOAD writes main memory
+DEPLOY_AUX = 1         # LOAD writes aux memory (staging for EXCHANGE)
+PURPOSE_PROGRAM = 0
+PURPOSE_PREVIEW = 1
 
 
 # Protocol constants
 MAGIC = b'A2'
 HEADER_SIZE = 6        # A2 + Type + Len(2) + Seq
 MAX_DATA_SIZE = 128    # Max payload per packet
+LOAD_CHUNK = MAX_DATA_SIZE - 2  # Program bytes per LOAD packet
 MAX_RETRIES = 3        # Retransmit attempts
 ACK_TIMEOUT = 2.0      # Seconds to wait for ACK
 
@@ -195,13 +211,21 @@ class A2PProtocol:
         """Create RESUME packet to return from BASIC."""
         return self.encode(PacketType.RESUME, b'')
 
-    def encode_binary(self, chunk: bytes, address: int, total: int) -> bytes:
-        """Create BINARY packet with machine code chunk.
+    def encode_deploy(self, mode: int, purpose: int) -> bytes:
+        """Create DEPLOY packet: where the following LOADs go and why."""
+        return self.encode(PacketType.DEPLOY, bytes([mode, purpose]))
 
-        Header: address(2) + total(2) + chunk_data
-        """
-        header = struct.pack('<HH', address, total)
-        return self.encode(PacketType.BINARY, header + chunk)
+    def encode_load(self, address: int, chunk: bytes) -> bytes:
+        """Create LOAD packet: address(2) + up to 126 bytes."""
+        return self.encode(PacketType.LOAD, struct.pack('<H', address) + chunk)
+
+    def encode_run(self, descriptor: bytes) -> bytes:
+        """Create RUN packet with a launch descriptor."""
+        return self.encode(PacketType.RUN, descriptor)
+
+    def encode_show(self, mode: int) -> bytes:
+        """Create SHOW packet: 0 = text, 1 = HGR preview."""
+        return self.encode(PacketType.SHOW, bytes([mode]))
 
     def decode_packet(self, data: bytes) -> Optional[Packet]:
         """

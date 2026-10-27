@@ -17,17 +17,14 @@ fi
 PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
 echo "Found Python $PYTHON_VERSION"
 
-# Check for pip
-if ! python3 -m pip --version &> /dev/null; then
-    echo "ERROR: pip is required but not installed."
-    exit 1
-fi
-
-# Install anthropic package
+# Python packages go in a project virtualenv (.venv); the proxy switches
+# into it automatically, however it's started
 echo
-echo "Installing Python dependencies..."
-python3 -m pip install --quiet anthropic
-echo "Installed: anthropic"
+echo "Creating .venv and installing Python dependencies..."
+python3 -m venv .venv
+.venv/bin/pip install --quiet --upgrade pip
+.venv/bin/pip install --quiet -r requirements.txt
+echo "Installed: $(.venv/bin/pip list 2>/dev/null | grep -iE '^(anthropic|pillow) ' | tr -s ' ' | paste -sd ',' -)"
 
 # Check for API key
 if [ ! -f proxy/.env ]; then
@@ -55,7 +52,7 @@ echo
 if command -v ca65 &> /dev/null; then
     echo "Found ca65 (cc65 toolchain) - can build agent from source"
 else
-    echo "Note: ca65 not found - using pre-built AGENT.BIN"
+    echo "Note: ca65 not found - using the pre-built agent disk"
     echo "Install cc65 if you want to modify the Apple II client"
 fi
 
@@ -68,9 +65,8 @@ echo "  2. Check status:       ./proxy.sh status"
 echo "  3. View logs:          ./proxy.sh log"
 echo "  4. Stop the proxy:     ./proxy.sh stop"
 echo
-echo "On your Apple II:"
-echo "  1. Boot from disks/agent_contiguous.dsk"
-echo "  2. Run: BRUN AGENT.BIN"
-echo "  3. Use /SETIP to set your proxy's IP address"
-echo "  4. Start chatting!"
+echo "On your Apple II (128K //e recommended, Uthernet II in slot 3):"
+echo "  1. Boot disks/agent_contiguous.dsk - it starts the agent by itself"
+echo "  2. /SETIP <this computer's IP>   (the proxy listens on port 6502)"
+echo "  3. Ask for anything: MAKE A BREAKOUT GAME IN HI-RES"
 echo

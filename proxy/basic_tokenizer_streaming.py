@@ -212,12 +212,15 @@ def tokenize_line_content(content: str) -> bytearray:
                 # OR inside COLOR, AND inside DEMAND, TO inside GOTO, etc.
                 # Operators (+, -, *, /, etc.) don't need boundary checks
                 if keyword.isalpha() or keyword.endswith('('):
-                    # Check if followed by alphanumeric (part of variable name)
+                    # Only letters glue a keyword into a variable name;
+                    # digits don't (GOTO10, 1THEN, TO10 all tokenize on a
+                    # real Apple II)
                     end_pos = i + len(keyword)
-                    if end_pos < len(content) and content[end_pos].isalnum():
+                    if (keyword.isalpha() and end_pos < len(content)
+                            and content[end_pos].isalpha()):
                         continue  # Skip - it's part of a variable name
-                    # Check if preceded by alphanumeric (part of variable name)
-                    if i > 0 and content[i-1].isalnum():
+                    # Check if preceded by a letter (part of variable name)
+                    if i > 0 and content[i-1].isalpha():
                         continue  # Skip - it's part of a variable name
 
                 result.append(token)
@@ -257,6 +260,9 @@ def tokenize_program(source: str, start_address: int = 0x0801) -> bytes:
     # Split into lines and process
     lines = source.strip().replace('\r\n', '\n').replace('\r', '\n').split('\n')
 
+    # Applesoft keeps lines in ascending order; like typing them in, a
+    # repeated line number replaces the earlier line
+    numbered = {}
     for line in lines:
         line = line.strip()
         if not line:
@@ -270,6 +276,10 @@ def tokenize_program(source: str, start_address: int = 0x0801) -> bytes:
 
         if line_num > 63999:
             raise ValueError(f"Line number {line_num} exceeds maximum 63999")
+        numbered[line_num] = content
+
+    for line_num in sorted(numbered):
+        content = numbered[line_num]
 
         # Tokenize the line content
         tokenized = tokenize_line_content(content)

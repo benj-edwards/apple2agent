@@ -84,6 +84,7 @@ def start():
     with open(log_file, 'w') as log:
         subprocess.Popen(
             [sys.executable, '-u', PROXY_SCRIPT],
+            stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
             start_new_session=True

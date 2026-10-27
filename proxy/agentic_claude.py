@@ -2,1535 +2,1153 @@
 """
 Agentic Claude for Apple II
 
-Provides an agentic loop where Claude can use tools to:
-1. Develop and test code in the Bobbin emulator (fast iteration)
-2. Control the real Apple II via A2P protocol (deployment)
-3. Stream results back to the user
+The loop behind the AGENT> prompt. Claude writes a program, tests it in a
+Bobbin emulator launched exactly the way the user's Apple II will run it,
+looks at the real screen (text, or color HGR/GR screenshots), fixes what's
+wrong, and deploys it to the Apple II ready to run.
 
-The agent can work in the emulator for speed, then deploy to real hardware.
+Everything streams to the Apple II while it happens: Claude's progress
+notes, each tool step, the code scrolling by as it's written, emulator
+output, and live HGR previews of what the game looks like.
+
+The proxy session (unified_proxy.AppleIISession) supplies the Apple II side:
+    send_status(msg)        status line (row 22)
+    send_stream_line(text)  scrolling output area
+    deploy_program(prog)    DEPLOY/LOAD/RUN packets -> READY on the Apple II
+    send_preview(hgr8k)     show an HGR screenshot on the Apple II
+    has_aux, can_deploy     client capabilities
 """
 
-import os
+import base64
 import json
-import subprocess
+import os
+import re
+import shutil
+import socket
 import threading
 import time
 from pathlib import Path
-from typing import Optional, Callable, Dict, List, Any
+from typing import Any, Dict, List, Optional
 
-# Try to import anthropic
 try:
     import anthropic
+    from jiter import from_json     # the SDK's own partial-JSON parser
     HAS_ANTHROPIC = True
 except ImportError:
     HAS_ANTHROPIC = False
 
-# Tool definitions for Claude
-APPLE2_TOOLS = [
-    {
-        "name": "emulator_boot",
-        "description": "SLOW: Cold boot the emulator. Use emulator_load_env instead for instant start!",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "disk": {
-                    "type": "string",
-                    "description": "Optional path to disk image to boot"
-                }
-            },
-            "required": []
-        }
-    },
-    {
-        "name": "emulator_load_env",
-        "description": "INSTANT: Load a pre-saved environment. Much faster than boot! Use 'basic' for bare BASIC, 'prodos' for ProDOS (disk commands), 'dos33' for DOS 3.3 (CATALOG/SAVE/LOAD).",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "env": {
-                    "type": "string",
-                    "enum": ["basic", "prodos", "dos33"],
-                    "description": "Environment: basic (bare BASIC), prodos (ProDOS BASIC), dos33 (DOS 3.3 BASIC). Default: basic"
-                }
-            },
-            "required": []
-        }
-    },
-    {
-        "name": "emulator_type",
-        "description": "Type text into the emulator as if from keyboard. Text will be uppercased.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "text": {
-                    "type": "string",
-                    "description": "Text to type"
-                },
-                "press_return": {
-                    "type": "boolean",
-                    "description": "Press RETURN after typing (default: true)"
-                }
-            },
-            "required": ["text"]
-        }
-    },
-    {
-        "name": "emulator_read_screen",
-        "description": "Read the current 40x24 text screen from the emulator.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
-    },
-    {
-        "name": "emulator_run_basic",
-        "description": "Execute a BASIC command in the emulator and wait for the prompt.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "BASIC command to execute"
-                }
-            },
-            "required": ["command"]
-        }
-    },
-    {
-        "name": "emulator_inject_basic",
-        "description": "Inject a tokenized BASIC program into emulator memory. Program becomes ready to RUN.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "source": {
-                    "type": "string",
-                    "description": "BASIC source code with line numbers"
-                },
-                "auto_run": {
-                    "type": "boolean",
-                    "description": "Automatically RUN after injection (default: false)"
-                }
-            },
-            "required": ["source"]
-        }
-    },
-    {
-        "name": "emulator_capture_graphics",
-        "description": "Capture the graphics screen (lo-res or hi-res) as ASCII art.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "mode": {
-                    "type": "string",
-                    "enum": ["gr", "hgr"],
-                    "description": "Graphics mode: gr=lo-res 40x48, hgr=hi-res 280x192"
-                }
-            },
-            "required": ["mode"]
-        }
-    },
-    {
-        "name": "emulator_peek",
-        "description": "Read bytes from emulator memory.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "address": {
-                    "type": "integer",
-                    "description": "Memory address (0-65535)"
-                },
-                "count": {
-                    "type": "integer",
-                    "description": "Number of bytes to read (default: 1)"
-                }
-            },
-            "required": ["address"]
-        }
-    },
-    {
-        "name": "emulator_poke",
-        "description": "Write bytes to emulator memory.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "address": {
-                    "type": "integer",
-                    "description": "Memory address (0-65535)"
-                },
-                "data": {
-                    "type": "array",
-                    "items": {"type": "integer"},
-                    "description": "Bytes to write (0-255 each)"
-                }
-            },
-            "required": ["address", "data"]
-        }
-    },
-    {
-        "name": "apple2_send_code",
-        "description": "Send BASIC code to the REAL Apple II via A2P protocol. Use this to deploy tested code.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "source": {
-                    "type": "string",
-                    "description": "BASIC source code with line numbers"
-                }
-            },
-            "required": ["source"]
-        }
-    },
-    {
-        "name": "apple2_send_message",
-        "description": "Send a text message to display on the REAL Apple II.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "message": {
-                    "type": "string",
-                    "description": "Message to display"
-                }
-            },
-            "required": ["message"]
-        }
-    },
-    {
-        "name": "apple2_send_status",
-        "description": "Send a status update to the REAL Apple II status line.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "status": {
-                    "type": "string",
-                    "description": "Status message"
-                }
-            },
-            "required": ["status"]
-        }
-    },
-    {
-        "name": "emulator_assemble",
-        "description": "Assemble 6502 assembly code and inject into emulator. Returns the load address. Use this for machine language programs.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "source": {
-                    "type": "string",
-                    "description": "6502 assembly source code (ca65 format)"
-                },
-                "load_address": {
-                    "type": "integer",
-                    "description": "Load address (default: $6000 = 24576)"
-                }
-            },
-            "required": ["source"]
-        }
-    },
-    {
-        "name": "emulator_call",
-        "description": "Call a machine language routine at an address. The routine should end with RTS.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "address": {
-                    "type": "integer",
-                    "description": "Address to call (JSR)"
-                }
-            },
-            "required": ["address"]
-        }
-    },
-    {
-        "name": "apple2_send_binary",
-        "description": "Send assembled machine code to the REAL Apple II. Use use_last=true to deploy the last assembled binary (avoids passing hex). Or provide hex_data directly.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "use_last": {
-                    "type": "boolean",
-                    "description": "Deploy the last assembled binary (from emulator_assemble). Preferred - avoids hex tokens."
-                },
-                "hex_data": {
-                    "type": "string",
-                    "description": "Assembled binary as hex string (only if use_last is not available)"
-                },
-                "load_address": {
-                    "type": "integer",
-                    "description": "Address to load code (default: $6000)"
-                }
-            }
-        }
-    },
-    {
-        "name": "disk_save_basic",
-        "description": "Save a BASIC program to disk. The program will be tokenized and saved so the user can BLOAD or RUN it later. Requires user permission.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "filename": {
-                    "type": "string",
-                    "description": "Filename on disk (max 15 chars, will be uppercased)"
-                },
-                "source": {
-                    "type": "string",
-                    "description": "BASIC source code with line numbers"
-                }
-            },
-            "required": ["filename", "source"]
-        }
-    },
-    {
-        "name": "disk_save_binary",
-        "description": "Save a binary file to disk. Use this to save assembled machine code. Requires user permission.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "filename": {
-                    "type": "string",
-                    "description": "Filename on disk (max 15 chars, will be uppercased)"
-                },
-                "hex_data": {
-                    "type": "string",
-                    "description": "Binary data as hex string"
-                },
-                "load_address": {
-                    "type": "integer",
-                    "description": "Load address for the binary (default: $6000)"
-                }
-            },
-            "required": ["filename", "hex_data"]
-        }
-    },
-    {
-        "name": "disk_save_text",
-        "description": "Save a text file to disk. Use this to save documentation, data files, or source code. Requires user permission.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "filename": {
-                    "type": "string",
-                    "description": "Filename on disk (max 15 chars, will be uppercased)"
-                },
-                "content": {
-                    "type": "string",
-                    "description": "Text content to save"
-                }
-            },
-            "required": ["filename", "content"]
-        }
-    },
-    {
-        "name": "disk_list",
-        "description": "List files on the current disk. Shows filename, type, and size.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
-    },
-    {
-        "name": "emulator_read_basic_program",
-        "description": "Read the current BASIC program from emulator memory and detokenize it. Use this when the user reports an error or you need to see what's in memory.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
+import deploy
+from deploy import BuildError
+
+# Model selection byte from the Apple II (CONFIG_MODEL) -> model ID
+MODEL_SONNET = 0
+MODEL_OPUS = 1
+MODEL_HAIKU = 2
+MODEL_IDS = {
+    MODEL_SONNET: "claude-sonnet-5-5",
+    MODEL_OPUS: "claude-opus-5-5",
+    MODEL_HAIKU: "claude-haiku-5-5",
+}
+MODEL_NAMES = {MODEL_SONNET: "SONNET", MODEL_OPUS: "OPUS", MODEL_HAIKU: "HAIKU"}
+
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+DEFAULT_EFFORT = "medium"
+MAX_TOKENS = 128000            # Opus 5.5's cap (streaming); a big game's first plan used all of 64K
+MAX_TOKEN_RETRIES = 2
+
+WORKSPACE = Path(__file__).resolve().parent.parent / "programs"
+BUILD_DIR = WORKSPACE / "build"
+HISTORY_DIR = WORKSPACE / "history"
+
+MAX_IMAGES_PER_RESULT = 3
+THINK_MAX_LINES = 3             # screen lines per paragraph of the thinking summary
+CARD_MAX_ROWS = 15              # closing card: leaves room for the READY banner below
+MAX_WAIT_PER_CALL = 30.0
+NAME_RE = re.compile(r'^[A-Z0-9][A-Z0-9._-]{0,29}$')
+SOURCE_EXTS = (".BAS", ".S", ".ASM")
+
+# Optional API features, dropped one by one if the API rejects them
+BETA_FALLBACK = "server-side-fallback-2026-07-01"
+BETA_COMPACT = "compact-2026-01-12"
+
+
+SYSTEM_PROMPT = """You are the Apple II Agent. You run inside a small proxy connected over Ethernet to a real Apple IIe. The person you're talking to is sitting at that Apple II, typing on its keyboard and reading its text screen. They ask for programs in plain English; you build them, test them in an emulator, and deliver them to their Apple II ready to run. Make it feel like magic: they type a wish, watch you work, and a minute later press RETURN and play.
+
+HOW YOU WORK
+1. Decide BASIC or machine code. Applesoft BASIC is great for text programs, utilities, simple graphics and turn-based games. For anything fast or animated (action games, smooth hi-res animation) write 6502 assembly.
+2. Write the program with write_file: NAME.BAS for Applesoft (numbered lines) or NAME.S for ca65 assembly.
+3. Test it with run_in_emulator. That boots an Apple IIe emulator at real 1 MHz speed, launches your program exactly the way the user's Apple II will, types the keys you give it, and shows you the screen. Graphics come back as images: look at them like a player would. Is it drawn where you expect? Colors right? Does it look good?
+4. Fix what's wrong (edit_file for small changes) and test again until it works. For games, play a little: press the controls, check that things move, collisions and scoring work, and that ESC quits.
+5. Call deploy_to_apple. Their Apple II loads it and shows a READY screen; they press RETURN to run it.
+6. End with a short message for their screen: what you made and how to use it (the controls), and that ESC brings them back here.
+
+Big programs (a deluxe game, thousands of lines): don't design the whole thing in your head first - one response holds only so much, and planning everything up front can use it all up before a line is written. Sketch the plan briefly, write a first playable version (the main loop, drawing, controls), test it, then add the rest in pieces with edit_file, testing as you go. Write a long file in parts: write_file the first part, then edit_file to append the rest.
+
+Even small programs get one quick emulator run before deploying - a typo should never reach the user. If the user just asks a question or chats, answer briefly without building anything. If they report a problem ("FIX: ..."), it came from their real Apple II: read the file, fix it, test, redeploy.
+
+WHAT THE USER SEES WHILE YOU WORK
+They watch a live log on their Apple II: your short notes between steps, each tool step, your code scrolling by as you write it, emulator output, and your hi-res test screenshots as previews. Before each major step write one short plain sentence about what you're doing ("Drawing the city skyline next."). Keep notes friendly and brief.
+
+YOUR FINAL MESSAGE
+It appears on a {cols}-column screen. Keep it under 10 short lines. Plain text only: no markdown, no asterisks, no backticks, no headings, no emoji; use "-" for lists. {case_rule}
+
+THE MACHINE YOUR PROGRAM RUNS ON
+- {machine}
+- Text screen 40x24 at $0400. Lo-res GR uses $0400-$07FF. Hi-res HGR page 1 is $2000-$3FFF, page 2 is $4000-$5FFF.
+- Your program owns {memory}. Page 3 from $0300 to $03C6 is also free.
+- Never touch $03C7-$03FF (the hooks and vectors that bring the user back to you), $BF00-$BFFF (ProDOS), language card RAM ($D000-$FFFF), or aux memory $6000-$BEFF. Don't change the reset or BRK vectors.
+- No disk access: BASIC.SYSTEM commands (PRINT CHR$(4)...) are not available.
+- Memory is NOT cleared before your program starts - it holds leftovers, on the real machine and in the emulator alike. Initialize every variable and table you use, and clear any screen you draw on (HGR clears page 1, HGR2 page 2; in machine code clear the hi-res page yourself).
+- Keyboard: $C000 (bit 7 set = key waiting), clear it by touching $C010. Open/Closed Apple keys: $C061/$C062 (bit 7). Speaker: each access to $C030 clicks it. Vertical blank: $C019 bit 7 is 0 during VBL, 60 times a second - wait for it to pace a game at a steady speed.
+
+GETTING BACK HERE (every program must do this)
+- ESC quits back to the agent.
+- Applesoft: on ESC do TEXT : HOME : & (the & statement returns to the agent). ESC typed at an INPUT prompt (or at ]) comes back to the agent by itself, so INPUT is fine for typed commands.
+- For typed input don't clear the keyboard first: POKE -16368,0 before reading a line throws away a key the user already pressed. Clear it only where stale keys matter (the start of an action game).
+- Machine code: on ESC switch to text (STA $C051, STA $C054) and RTS with the stack balanced, or JMP $03D0.
+- Ctrl-Reset also comes back here, and a crash into BRK comes back with the crash address.
+
+APPLESOFT NOTES
+- The deployer places your program for you: with HGR it keeps the hi-res page(s) clear and puts variables above them. Don't use HIMEM:, LOMEM:, or POKE 103, 104, 115 or 116.
+- Only the first two letters of a variable name count (SCORE and SC are the same variable). Never use names that contain a keyword (TO, OR, AND, AT, FN, ON, IF, GR...): use SC not SCORE, LV not LEVEL.
+- Applesoft is slow (roughly 1000 simple statements a second). For anything real-time keep the loop tiny, avoid redrawing everything, read keys with K = PEEK(-16384): IF K > 127 THEN POKE -16368,0 (GET waits for a key).
+- Small machine-code helpers (sound, fast fills) can be POKEd into $0300-$03C6 from DATA statements and CALLed.
+
+6502 ASSEMBLY NOTES (ca65 syntax)
+- Begin with .org $0800 (any address from $0800 up works). Execution starts at the label start if you define one, otherwise at the first byte.
+- Code and data must stay out of the hi-res pages you draw on: from $0800 a program reaches $2000 after 6K. Big hi-res programs: .org $6000 (room up to $BEFF), or $0800-$1FFF plus $4000 up when you only use page 1.
+- One file, no .include. Labels end with a colon; .byte, .word, .res, .proc, .macro and @local labels all work.
+- Prefer plain 6502 instructions; the 65C02 extras (BRA, PHX, STZ...) do work on this enhanced //e.
+- ROM: COUT $FDED (character in A with bit 7 set), HOME $FC58, WAIT $FCA8 (delay ~ A*A*2.5 cycles), RDKEY $FD0C.
+- Display switches: $C050 graphics, $C051 text, $C052 full screen, $C053 mixed, $C054 page 1, $C055 page 2, $C056 lo-res, $C057 hi-res.
+- HGR row Y starts at $2000 + (Y AND 7)*$400 + ((Y/8) AND 7)*$80 + (Y/64)*$28; 7 pixels per byte, low bit = leftmost, bit 7 picks the color group (violet/green or blue/orange). Use a precomputed row table. Double-buffer by drawing on the hidden page and flipping $C054/$C055.
+
+TESTING
+- run_in_emulator(file, wait, steps): steps type keys - plain characters plus {LEFT} {RIGHT} {UP} {DOWN} {SPACE} {RETURN} {ESC} {CTRL-C} - then wait some seconds and optionally look. Keys arrive with the real //e codes (LEFT 8, RIGHT 21, UP 11, DOWN 10, RETURN 13, ESC 27; bit 7 set at $C000) at a quick typist's pace, about 12 a second. Waits are real seconds; keep a call under about 15 seconds.
+- emulator_input keeps playing the program that is already running; emulator_memory dumps memory and registers for debugging.
+- If a result reports that the program wrote into agent memory or the hooks, fix that before deploying: it would crash their real Apple II."""
+
+
+def apple_text(text: str, uppercase: bool) -> str:
+    """Make text safe and readable on an Apple II screen."""
+    replacements = {
+        "‘": "'", "’": "'", "“": '"', "”": '"',
+        "–": "-", " — ": " - ", "—": " - ", "…": "...", "•": "-",
+        "×": "x", "→": "->", "←": "<-", "↑": "^",
+        "↓": "v", " ": " ",
     }
+    for a, b in replacements.items():
+        text = text.replace(a, b)
+    text = text.replace("**", "").replace("__", "").replace("`", "")
+    text = re.sub(r'^\s*#+\s*', '', text, flags=re.MULTILINE)
+    text = text.encode("ascii", errors="replace").decode("ascii")
+    return text.upper() if uppercase else text
+
+
+def word_wrap(text: str, width: int) -> List[str]:
+    """Wrap one line of text to the screen width (indent preserved)."""
+    indent = len(text) - len(text.lstrip(" "))
+    words = text.split()
+    if not words:
+        return [""]
+    lines = []
+    current = " " * indent + words[0]
+    for word in words[1:]:
+        if len(current) + 1 + len(word) <= width:
+            current += " " + word
+        else:
+            lines.append(current)
+            current = " " * indent + word
+    lines.append(current)
+    return [l[:width] for l in lines]
+
+
+TOOLS = [
+    {
+        "name": "write_file",
+        "description": "Create or replace a source file in the workspace. NAME.BAS = Applesoft BASIC "
+                       "(numbered lines), NAME.S = ca65 6502 assembly. Name: letters, digits, '.', '-', "
+                       "up to 30 characters.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "File name, e.g. INVADERS.S"},
+                "content": {"type": "string", "description": "The complete file contents"},
+            },
+            "required": ["name", "content"],
+        },
+    },
+    {
+        "name": "edit_file",
+        "description": "Replace one exact snippet of a workspace file. old_text must appear exactly "
+                       "once (include a few surrounding characters to make it unique). Use for "
+                       "small fixes instead of rewriting the whole file.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "old_text": {"type": "string"},
+                "new_text": {"type": "string"},
+            },
+            "required": ["name", "old_text", "new_text"],
+        },
+    },
+    {
+        "name": "read_file",
+        "description": "Show a workspace file with line numbers. With no name, list the workspace.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+        },
+    },
+    {
+        "name": "run_in_emulator",
+        "description": "Build a workspace file and run it in a fresh Apple //e emulator, launched "
+                       "exactly as the user's Apple II will launch it (same memory layout, same ESC "
+                       "and return hooks), at real 1 MHz speed. Lets it run `wait` seconds, looks, "
+                       "then performs `steps`. Reports build info, what the program is doing "
+                       "(running, ended, error, crashed, or exited to the agent), the text screen, "
+                       "and screenshots when it's in a graphics mode. Your hi-res screenshots also "
+                       "show up on the user's Apple II as live previews.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file": {"type": "string", "description": "Workspace file to build and run"},
+                "wait": {"type": "number", "description": "Seconds to run before the first look (default 2)"},
+                "steps": {
+                    "type": "array",
+                    "description": "Interaction after the first look. The final state is always captured.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "keys": {"type": "string", "description": "Keys to type: characters plus "
+                                     "{LEFT} {RIGHT} {UP} {DOWN} {SPACE} {RETURN} {ESC} {CTRL-X}"},
+                            "wait": {"type": "number", "description": "Seconds to wait after typing (default 0.5)"},
+                            "look": {"type": "boolean", "description": "Capture the screen after this step"},
+                        },
+                    },
+                },
+            },
+            "required": ["file"],
+        },
+    },
+    {
+        "name": "emulator_input",
+        "description": "Keep interacting with the program already running in the emulator (started by "
+                       "run_in_emulator). Same steps format; the final state is always captured.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "steps": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "keys": {"type": "string"},
+                            "wait": {"type": "number"},
+                            "look": {"type": "boolean"},
+                        },
+                    },
+                },
+            },
+            "required": ["steps"],
+        },
+    },
+    {
+        "name": "emulator_memory",
+        "description": "Debugging: hex dump of emulator main memory plus the CPU registers and the "
+                       "labels from the last assembly.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "address": {"type": "integer", "description": "Start address (0-65535)"},
+                "count": {"type": "integer", "description": "Bytes to dump (1-512, default 64)"},
+            },
+            "required": ["address"],
+        },
+    },
+    {
+        "name": "deploy_to_apple",
+        "description": "Send a tested program to the user's real Apple II. It loads into memory and "
+                       "the Apple II shows a READY screen with the title; the user presses RETURN to "
+                       "run it. Call this when the program works.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file": {"type": "string"},
+                "title": {"type": "string", "description": "Short name for the READY screen, e.g. SPACE RESCUE"},
+            },
+            "required": ["file", "title"],
+        },
+    },
 ]
+
+TOOL_LABELS = {
+    "write_file": "WRITING",
+    "edit_file": "EDITING",
+    "read_file": "READING",
+    "run_in_emulator": "TESTING",
+    "emulator_input": "PLAYING",
+    "emulator_memory": "DEBUGGING",
+    "deploy_to_apple": "SENDING TO YOUR APPLE II",
+}
+
+
+class StopRequested(Exception):
+    """The user pressed ESC on the Apple II while waiting."""
+
+
+def _shut_down_stream_socket(stream) -> bool:
+    """Wake a thread blocked reading this API stream.
+
+    stream.close() from another thread can block on the connection the
+    reader holds; shutting the socket down takes no locks and makes the
+    blocked read fail at once (the reader then closes the stream itself).
+    """
+    try:
+        network_stream = stream.response.extensions.get("network_stream")
+        sock = network_stream.get_extra_info("socket") if network_stream else None
+        if sock is None:
+            return False
+        sock.shutdown(socket.SHUT_RDWR)
+        return True
+    except Exception as e:
+        print(f"[Agent] couldn't interrupt the stream: {e!r}")
+        return False
 
 
 class AgenticClaude:
-    """
-    Agentic Claude that can use tools to interact with Apple II.
+    """Conversation + tools for one Apple II. Survives reconnects."""
 
-    Supports two targets:
-    - Emulator (Bobbin via MCP): Fast development and testing
-    - Real Apple II (via A2P): Deployment and live interaction
-    """
-
-    def __init__(self,
-                 send_to_apple2: Callable[[str], None],
-                 send_status: Callable[[str], None],
-                 send_code: Callable[[str], None],
-                 mcp_call: Optional[Callable[[str, dict], Any]] = None,
-                 send_binary: Optional[Callable[[str, int], None]] = None,
-                 send_stream: Optional[Callable[[str], None]] = None):
-        """
-        Args:
-            send_to_apple2: Function to send response text to real Apple II
-            send_status: Function to send status updates to real Apple II
-            send_code: Function to send BASIC code to real Apple II
-            mcp_call: Function to call MCP tools (for emulator)
-            send_binary: Function to send machine code to real Apple II
-            send_stream: Function to send scrolling output text to Apple II
-        """
-        self.send_to_apple2 = send_to_apple2
-        self.send_status = send_status
-        self.send_code = send_code
-        self.mcp_call = mcp_call
-        self.send_binary = send_binary
-        self.send_stream = send_stream
-
+    def __init__(self, session=None, mcp_call=None, **_legacy):
+        self.session = session
         self.client = None
-        if HAS_ANTHROPIC:
-            api_key = os.environ.get('ANTHROPIC_API_KEY')
-            if api_key:
-                self.client = anthropic.Anthropic(api_key=api_key)
+        if HAS_ANTHROPIC and os.environ.get('ANTHROPIC_API_KEY'):
+            self.client = anthropic.Anthropic(max_retries=4)
 
-        self.conversation: List[Dict] = []
-        self.emulator_running = False
+        self.conversation: List[Dict[str, Any]] = []
+        self.custom_prompt: Optional[str] = None
+        self.effort = DEFAULT_EFFORT
+        self.display_width = 39
+        self.display_uppercase = True
+        self.deploy_history: List[deploy.Program] = []
+        self._disabled = set()          # optional API features the API refused
+        self._machine_note_sent = None
+        self._labels: Dict[str, int] = {}
+        self._emulator_ready = False
 
-        # Store last assembled binary for deployment
-        self.last_binary: Optional[str] = None
-        self.last_binary_addr: int = 0x6000
-
-        # Thread-safe heartbeat to keep Apple II TCP connection alive
-        self._send_lock = threading.Lock()
-        self._last_send_time = 0.0
+        # Live status
+        self._phase = "THINKING"
+        self._turn = 0
+        self._session_start = 0.0
+        self._last_status = 0.0
         self._heartbeat_running = False
         self._heartbeat_thread = None
-        self._heartbeat_paused = False  # Pause during code deployment
 
-        # Phase tracking for detailed status display
-        self._current_turn = 0
-        self._max_turns = 50
-        self._phase = "THINKING"  # THINKING, CODING, TESTING, DEPLOYING, etc.
-        self._phase_start = 0.0
+        # Streaming display state
+        self._text_buf = ""
+        self._think_buf = ""
+        self._think_shown = False
+        self._tool_streaming = ""
+        self._tool_json = ""
+        self._code_lines_shown = 0
+        self._code_last_show = 0.0
+        self._writing_name = ""
 
-        # Context management - compact when approaching limit
-        self.max_context_tokens = 150000  # Leave headroom for 200k context
-        self.compact_threshold = 100000   # Start compacting at this level
+        # Previews run in the background; deploys wait for them
+        self._preview_thread: Optional[threading.Thread] = None
+        self._previews_allowed = True
 
-        # Custom prompt - user can set additional context/instructions
-        self.custom_prompt: Optional[str] = None
+        # ESC on the Apple II while it waits -> /STOP -> request_stop()
+        self._stop_requested = False
+        self._active_stream = None
+        self.busy = False               # a request is running (set by the proxy)
 
-        # Display mode properties (set by proxy from /DISPLAY or INIT packet)
-        self.display_width = 39       # 39 for 40-col, 79 for 80-col
-        self.display_uppercase = True  # True for 40U, False for 40L/80
+        WORKSPACE.mkdir(exist_ok=True)
 
-        # Track last user message for checkpoint descriptions
-        self._last_user_message: str = ""
+    # ------------------------------------------------------------------
+    # Apple II output helpers
+    # ------------------------------------------------------------------
 
-    def _stream(self, text: str):
-        """Send scrolling output text to Apple II (if send_stream is available).
-        This shows text in the main output area, scrolling like Claude Code.
-        Uses _send_lock to avoid interleaving with heartbeat status updates."""
-        if self.send_stream:
+    def _status(self, msg: str):
+        if self.session:
             try:
-                with self._send_lock:
-                    self.send_stream(text)
-                    self._last_send_time = time.time()
+                self.session.send_status(apple_text(msg, True)[:self.display_width])
             except Exception:
                 pass
+        self._last_status = time.time()
 
-    def _stream_emulator_screen(self, result: str, max_lines: int = 6):
-        """Stream emulator screen content to Apple II output area.
-        Shows non-blank lines from the emulator screen so the user
-        can follow what the agent sees during testing."""
-        lines = result.strip().split('\n')
-        # Filter to non-blank lines
-        content_lines = [l.rstrip() for l in lines if l.strip()]
-        if not content_lines:
+    def _line(self, text: str):
+        """Send text to the scrolling output area, word-wrapped."""
+        if not self.session:
+            print(f"[A2] {text}")
             return
+        width = self.display_width
+        for raw in apple_text(text, self.display_uppercase).split("\n"):
+            for line in word_wrap(raw, width):
+                try:
+                    self.session.send_stream_line(line)
+                except Exception:
+                    return
+        self._last_status = time.time()
 
-        self._stream("  --- EMU ---")
-        shown = 0
-        for line in content_lines:
-            if shown >= max_lines:
-                remaining = len(content_lines) - shown
-                if remaining > 0:
-                    self._stream(f"  ({remaining} MORE)")
-                break
-            formatted = self._format_text(line)
-            for wrapped in self._word_wrap(formatted):
-                self._stream(f"  {wrapped}")
-            shown += 1
-        self._stream("  ---------")
-
-    def _format_text(self, text: str) -> str:
-        """Apply display case formatting."""
-        return text.upper() if self.display_uppercase else text
-
-    def _word_wrap(self, text: str, width: int = None) -> list:
-        """Word-wrap text to fit Apple II display.
-        Returns a list of lines, each no longer than width chars."""
-        if width is None:
-            width = self.display_width
-        words = text.split()
-        if not words:
-            return []
-        lines = []
-        current = words[0]
-        for word in words[1:]:
-            if len(current) + 1 + len(word) <= width:
-                current += " " + word
-            else:
-                lines.append(current)
-                current = word
-                # If a single word exceeds width, truncate it
-                if len(current) > width:
-                    current = current[:width]
-        lines.append(current)
-        return lines
-
-    def _tool_param_hint(self, tool_name: str, tool_input: dict) -> str:
-        """Extract key parameter hint for a tool call (like Claude Code shows).
-        Returns a short string for 40-col display, or empty string."""
+    def _closing_card(self, text: str):
+        """The final message again on a fresh page, so what the program is and
+        its controls sit right above the READY banner (streamed, its start may
+        have scrolled off with the last page of the log)."""
+        page_break = getattr(self.session, "send_page_break", None)
+        if not page_break:
+            return
+        rows = []
+        for raw in apple_text(text.strip(), self.display_uppercase).split("\n"):
+            rows += word_wrap(raw, self.display_width) if raw.strip() else [""]
         try:
-            if tool_name == "emulator_load_env":
-                return tool_input.get("env", "basic").upper()
-            elif tool_name == "emulator_type":
-                t = tool_input.get("text", "")[:20].upper()
-                return f'"{t}"' if t else ""
-            elif tool_name == "emulator_run_basic":
-                c = tool_input.get("command", "")[:20].upper()
-                return c
-            elif tool_name == "emulator_inject_basic":
-                src = tool_input.get("source", "")
-                lines = src.count('\n') + 1
-                return f"{lines} LINES"
-            elif tool_name == "emulator_peek":
-                addr = tool_input.get("address", 0)
-                return f"${addr:04X}" if isinstance(addr, int) else str(addr)
-            elif tool_name == "emulator_poke":
-                addr = tool_input.get("address", 0)
-                return f"${addr:04X}" if isinstance(addr, int) else str(addr)
-            elif tool_name == "emulator_call":
-                addr = tool_input.get("address", 0)
-                return f"${addr:04X}" if isinstance(addr, int) else str(addr)
-            elif tool_name == "emulator_assemble":
-                src = tool_input.get("source", "")
-                lines = src.count('\n') + 1
-                return f"{lines} LINES"
-            elif tool_name in ("apple2_send_code", "disk_save_basic"):
-                src = tool_input.get("source", tool_input.get("code", ""))
-                lines = src.count('\n') + 1 if src else 0
-                return f"{lines} LINES"
-            elif tool_name == "apple2_send_binary":
-                addr = tool_input.get("load_address", 0)
-                return f"${addr:04X}" if isinstance(addr, int) else str(addr)
+            page_break()
+            for row in rows[:CARD_MAX_ROWS]:
+                self.session.send_stream_line(row)
         except Exception:
             pass
-        return ""
 
-    def set_custom_prompt(self, prompt: Optional[str]) -> None:
-        """Set a custom prompt that will be appended to the system prompt."""
-        self.custom_prompt = prompt
+    def _set_phase(self, phase: str):
+        if getattr(self, "_stop_requested", False):
+            phase = "STOPPING"      # what the user asked for, until it's done
+        self._phase = phase
+        self._status(f"{phase} {self._elapsed()}")
 
-    def clear_custom_prompt(self) -> None:
-        """Clear the custom prompt."""
-        self.custom_prompt = None
-
-    def _checkpoint_program(self, source: str, description: str):
-        """Auto-save program version to git for undo/versioning."""
-        try:
-            programs_dir = Path(__file__).parent.parent / "programs"
-            programs_dir.mkdir(exist_ok=True)
-
-            # Init git repo if needed
-            git_dir = programs_dir / ".git"
-            if not git_dir.exists():
-                subprocess.run(["git", "init"], cwd=programs_dir,
-                             capture_output=True, timeout=10)
-                subprocess.run(["git", "config", "user.email", "agent@apple2"],
-                             cwd=programs_dir, capture_output=True, timeout=10)
-                subprocess.run(["git", "config", "user.name", "Apple II Agent"],
-                             cwd=programs_dir, capture_output=True, timeout=10)
-
-            # Save source
-            program_file = programs_dir / "current.bas"
-            program_file.write_text(source)
-
-            # Auto-commit
-            subprocess.run(["git", "add", "current.bas"], cwd=programs_dir,
-                         capture_output=True, timeout=10)
-            subprocess.run(["git", "commit", "-m", description[:72],
-                          "--allow-empty-message"],
-                         cwd=programs_dir, capture_output=True, timeout=10)
-            print(f"[Checkpoint] {description[:72]}")
-        except Exception as e:
-            print(f"[Checkpoint] Error: {e}")
-
-    def _execute_tool(self, tool_name: str, tool_input: dict) -> str:
-        """Execute a tool and return the result."""
-
-        # Emulator tools (via MCP if available)
-        if tool_name.startswith("emulator_"):
-            if not self.mcp_call:
-                return "ERROR: Emulator not available (no MCP connection)"
-
-            # Map tool names to MCP tool names
-            mcp_map = {
-                "emulator_boot": "mcp__apple2-mcp__boot",
-                "emulator_load_env": "mcp__apple2-mcp__load_basic_env",
-                "emulator_type": "mcp__apple2-mcp__type_text",
-                "emulator_read_screen": "mcp__apple2-mcp__read_screen",
-                "emulator_run_basic": "mcp__apple2-mcp__run_basic",
-                "emulator_inject_basic": "mcp__apple2-mcp__inject_tokenized_basic",
-                "emulator_capture_graphics": "mcp__apple2-mcp__read_gr_ascii",
-                "emulator_peek": "mcp__apple2-mcp__peek",
-                "emulator_poke": "mcp__apple2-mcp__poke",
-            }
-
-            mcp_name = mcp_map.get(tool_name)
-            if not mcp_name:
-                return f"ERROR: Unknown emulator tool: {tool_name}"
-
-            try:
-                # Handle instant environment loading
-                if tool_name == "emulator_load_env":
-                    env = tool_input.get("env", "basic")
-                    env_tool_map = {
-                        "basic": "mcp__apple2-mcp__load_basic_env",
-                        "prodos": "mcp__apple2-mcp__load_prodos_env",
-                        "dos33": "mcp__apple2-mcp__load_dos33_env",
-                    }
-                    mcp_tool = env_tool_map.get(env, "mcp__apple2-mcp__load_basic_env")
-                    self.send_status(f"LOADING {env.upper()}...")
-                    result = self.mcp_call(mcp_tool, {})
-                    self.emulator_running = True
-                    self.send_status("EMULATOR READY")
-                    return f"Emulator ready ({env} environment loaded instantly)"
-
-                # Special handling for some tools
-                elif tool_name == "emulator_inject_basic":
-                    # Need to tokenize first
-                    self.send_status("TOKENIZING BASIC...")
-                    source = tool_input.get("source", "")
-                    result = self.mcp_call("mcp__apple2-mcp__tokenize", {"source": source})
-                    if "error" in str(result).lower():
-                        return f"Tokenization error: {result}"
-                    # Then inject
-                    self.send_status("INJECTING PROGRAM...")
-                    hex_data = result.get("hex", "") if isinstance(result, dict) else str(result)
-                    inject_input = {
-                        "hex_data": hex_data,
-                        "auto_run": tool_input.get("auto_run", False)
-                    }
-                    result = self.mcp_call("mcp__apple2-mcp__inject_tokenized_basic", inject_input)
-                    self.send_status("PROGRAM LOADED")
-                    # Checkpoint the program
-                    self._checkpoint_program(source, f"Emulator test: {self._last_user_message[:60]}")
-                    return str(result)
-
-                elif tool_name == "emulator_capture_graphics":
-                    mode = tool_input.get("mode", "gr")
-                    self.send_status(f"CAPTURING {mode.upper()} SCREEN...")
-                    if mode == "hgr":
-                        result = self.mcp_call("mcp__apple2-mcp__read_hgr_ascii", {})
-                    else:
-                        result = self.mcp_call("mcp__apple2-mcp__read_gr_ascii", {})
-                    return str(result)
-
-                elif tool_name == "emulator_boot":
-                    self.send_status("BOOTING EMULATOR...")
-                    self.emulator_running = True
-                    boot_input = {"machine": "enhanced", "uthernet2": True}
-                    if "disk" in tool_input:
-                        boot_input["disk"] = tool_input["disk"]
-                    result = self.mcp_call(mcp_name, boot_input)
-                    self.send_status("EMULATOR READY")
-                    return str(result)
-
-                elif tool_name == "emulator_run_basic":
-                    cmd = tool_input.get("command", "")[:20]
-                    self.send_status(f"RUNNING: {cmd}...")
-                    result = self.mcp_call(mcp_name, tool_input)
-                    self.send_status("READING OUTPUT...")
-                    screen = self.mcp_call("mcp__apple2-mcp__read_screen", {})
-                    # Return screen content to Claude for analysis (not shown to user)
-                    return str(result) + "\n\nScreen:\n" + str(screen)
-
-                elif tool_name == "emulator_read_screen":
-                    self.send_status("READING SCREEN...")
-                    result = self.mcp_call(mcp_name, tool_input)
-                    # Return to Claude for analysis (not shown to user)
-                    return str(result)
-
-                elif tool_name == "emulator_type":
-                    text = tool_input.get("text", "")[:15]
-                    self.send_status(f"TYPING: {text}...")
-                    result = self.mcp_call(mcp_name, tool_input)
-                    return str(result)
-
-                elif tool_name == "emulator_peek":
-                    addr = tool_input.get("address", 0)
-                    self.send_status(f"PEEK ${addr:04X}...")
-                    result = self.mcp_call(mcp_name, tool_input)
-                    return str(result)
-
-                elif tool_name == "emulator_poke":
-                    addr = tool_input.get("address", 0)
-                    self.send_status(f"POKE ${addr:04X}...")
-                    result = self.mcp_call(mcp_name, tool_input)
-                    return str(result)
-
-                else:
-                    result = self.mcp_call(mcp_name, tool_input)
-                    return str(result)
-
-            except Exception as e:
-                self.send_status(f"ERROR: {str(e)[:20]}")
-                return f"ERROR: {str(e)}"
-
-        # Real Apple II tools (via A2P protocol)
-        elif tool_name == "apple2_send_code":
-            self.send_status("DEPLOYING TO APPLE II...")
-            source = tool_input.get("source", "")
-            # Pause heartbeat during code deployment to prevent
-            # interleaved STATUS packets corrupting CODE stream
-            self._heartbeat_paused = True
-            try:
-                self.send_code(source)
-            finally:
-                self._heartbeat_paused = False
-            self.send_status("CODE DEPLOYED!")
-            # Checkpoint the program
-            self._checkpoint_program(source, f"Deploy: {self._last_user_message[:60]}")
-            return "Code sent to Apple II"
-
-        elif tool_name == "apple2_send_message":
-            message = tool_input.get("message", "")
-            self.send_to_apple2(message)
-            return "Message sent to Apple II"
-
-        elif tool_name == "apple2_send_status":
-            status = tool_input.get("status", "")
-            self.send_status(status)
-            return "OK"
-
-        elif tool_name == "apple2_send_binary":
-            self.send_status("DEPLOYING BINARY...")
-            use_last = tool_input.get("use_last", False)
-            if use_last and hasattr(self, 'last_binary') and self.last_binary:
-                hex_data = self.last_binary
-                load_addr = getattr(self, 'last_binary_addr', 0x6000)
-            else:
-                hex_data = tool_input.get("hex_data", "")
-                load_addr = tool_input.get("load_address", 0x6000)
-            if not hex_data:
-                return "ERROR: No binary data (use emulator_assemble first, or provide hex_data)"
-            if self.send_binary:
-                self.send_binary(hex_data, load_addr)
-                self.send_status(f"BINARY AT ${load_addr:04X}")
-                return f"Binary sent to Apple II at ${load_addr:04X}"
-            else:
-                return "ERROR: Binary send not available"
-
-        elif tool_name == "emulator_assemble":
-            if not self.mcp_call:
-                return "ERROR: Emulator not available (no MCP connection)"
-            source = tool_input.get("source", "")
-            load_addr = tool_input.get("load_address", 0x6000)
-            try:
-                # Assemble the code
-                self.send_status("ASSEMBLING 6502...")
-                result = self.mcp_call("mcp__apple2-mcp__assemble", {
-                    "source": source,
-                    "load_address": load_addr
-                })
-                if isinstance(result, dict) and "hex" in result:
-                    hex_data = result["hex"]
-                    size = len(hex_data.replace(" ", "")) // 2
-                    self.send_status(f"LOADING {size} BYTES...")
-                    # Load into emulator memory
-                    self.mcp_call("mcp__apple2-mcp__load_binary", {
-                        "address": load_addr,
-                        "hex_data": hex_data
-                    })
-                    # Store for later deployment
-                    self.last_binary = hex_data
-                    self.last_binary_addr = load_addr
-                    self.send_status(f"ASSEMBLED ${load_addr:04X}")
-                    return f"Assembled {size} bytes at ${load_addr:04X}. Use CALL {load_addr} to run."
-                else:
-                    self.send_status("ASSEMBLY FAILED")
-                    return f"Assembly error: {result}"
-            except Exception as e:
-                self.send_status("ASSEMBLY ERROR")
-                return f"ERROR: {str(e)}"
-
-        elif tool_name == "emulator_call":
-            if not self.mcp_call:
-                return "ERROR: Emulator not available (no MCP connection)"
-            address = tool_input.get("address", 0x6000)
-            try:
-                self.send_status(f"CALL ${address:04X}...")
-                result = self.mcp_call("mcp__apple2-mcp__call", {"address": address})
-                self.send_status("EXECUTED")
-                return f"Called ${address:04X}: {result}"
-            except Exception as e:
-                self.send_status("CALL FAILED")
-                return f"ERROR: {str(e)}"
-
-        elif tool_name == "disk_save_basic":
-            filename = tool_input.get("filename", "PROGRAM").upper()[:15]
-            source = tool_input.get("source", "")
-            # Notify user we're saving to disk
-            self.send_status(f"SAVING {filename} TO DISK...")
-            try:
-                # Use the MCP tool if available
-                if self.mcp_call:
-                    result = self.mcp_call("mcp__apple2-mcp__save_basic_to_disk", {
-                        "disk_filename": "disks/agent_contiguous.dsk",
-                        "program_name": filename,
-                        "source": source
-                    })
-                    # Checkpoint the program
-                    self._checkpoint_program(source, f"Disk save: {filename}")
-                    return f"Saved BASIC program '{filename}' to disk. User can BRUN {filename} or - {filename}"
-                else:
-                    return "ERROR: Disk operations not available (no MCP connection)"
-            except Exception as e:
-                return f"Disk save error: {str(e)}"
-
-        elif tool_name == "disk_save_binary":
-            filename = tool_input.get("filename", "PROGRAM").upper()[:15]
-            hex_data = tool_input.get("hex_data", "")
-            load_addr = tool_input.get("load_address", 0x6000)
-            self.send_status(f"SAVING {filename} TO DISK...")
-            try:
-                if self.mcp_call:
-                    # First write hex to temp file, then add to disk
-                    import tempfile
-                    hex_clean = hex_data.replace(" ", "").replace("\n", "")
-                    binary = bytes.fromhex(hex_clean)
-                    with tempfile.NamedTemporaryFile(delete=False, suffix='.bin') as f:
-                        f.write(binary)
-                        temp_path = f.name
-                    result = self.mcp_call("mcp__apple2-mcp__prodos_add", {
-                        "disk": "disks/agent_contiguous.dsk",
-                        "file": temp_path,
-                        "name": filename,
-                        "type": "BIN",
-                        "addr": f"{load_addr:04X}"
-                    })
-                    import os
-                    os.unlink(temp_path)
-                    return f"Saved binary '{filename}' to disk at ${load_addr:04X}. User can BRUN {filename}"
-                else:
-                    return "ERROR: Disk operations not available (no MCP connection)"
-            except Exception as e:
-                return f"Disk save error: {str(e)}"
-
-        elif tool_name == "disk_save_text":
-            filename = tool_input.get("filename", "FILE").upper()[:15]
-            content = tool_input.get("content", "")
-            self.send_status(f"SAVING {filename} TO DISK...")
-            try:
-                if self.mcp_call:
-                    import tempfile
-                    # Convert to Apple II text (CR line endings, high bit set)
-                    apple_text = content.replace("\n", "\r").upper()
-                    with tempfile.NamedTemporaryFile(delete=False, suffix='.txt', mode='w') as f:
-                        f.write(apple_text)
-                        temp_path = f.name
-                    result = self.mcp_call("mcp__apple2-mcp__prodos_add", {
-                        "disk": "disks/agent_contiguous.dsk",
-                        "file": temp_path,
-                        "name": filename,
-                        "type": "TXT"
-                    })
-                    import os
-                    os.unlink(temp_path)
-                    return f"Saved text file '{filename}' to disk."
-                else:
-                    return "ERROR: Disk operations not available (no MCP connection)"
-            except Exception as e:
-                return f"Disk save error: {str(e)}"
-
-        elif tool_name == "disk_list":
-            try:
-                if self.mcp_call:
-                    result = self.mcp_call("mcp__apple2-mcp__prodos_list", {
-                        "disk": "disks/agent_contiguous.dsk"
-                    })
-                    return str(result)
-                else:
-                    return "ERROR: Disk operations not available (no MCP connection)"
-            except Exception as e:
-                return f"Disk list error: {str(e)}"
-
-        elif tool_name == "emulator_read_basic_program":
-            if not self.mcp_call:
-                return "ERROR: Emulator not available (no MCP connection)"
-            try:
-                self.send_status("READING PROGRAM...")
-                # Read VARTAB pointer ($69-$6A) to find end of program
-                vartab_result = self.mcp_call("mcp__apple2-mcp__peek", {
-                    "address": 0x69,
-                    "count": 2,
-                    "format": "decimal"
-                })
-                # Parse the result to get the address
-                if isinstance(vartab_result, dict) and "bytes" in vartab_result:
-                    vartab_bytes = vartab_result["bytes"]
-                    vartab = vartab_bytes[0] + (vartab_bytes[1] << 8)
-                elif isinstance(vartab_result, str):
-                    # Try to parse from string
-                    import re
-                    nums = re.findall(r'\d+', vartab_result)
-                    if len(nums) >= 2:
-                        vartab = int(nums[0]) + (int(nums[1]) << 8)
-                    else:
-                        return f"ERROR: Could not parse VARTAB: {vartab_result}"
-                else:
-                    return f"ERROR: Unexpected VARTAB format: {vartab_result}"
-
-                # Calculate program size
-                prog_start = 0x0801
-                prog_size = vartab - prog_start
-                if prog_size <= 0 or prog_size > 48000:
-                    return f"No program in memory (VARTAB=${vartab:04X})"
-
-                # Read program bytes in chunks
-                self.send_status(f"READING {prog_size} BYTES...")
-                all_bytes = []
-                offset = 0
-                while offset < prog_size:
-                    chunk_size = min(256, prog_size - offset)
-                    result = self.mcp_call("mcp__apple2-mcp__peek", {
-                        "address": prog_start + offset,
-                        "count": chunk_size,
-                        "format": "decimal"
-                    })
-                    if isinstance(result, dict) and "bytes" in result:
-                        all_bytes.extend(result["bytes"])
-                    offset += chunk_size
-
-                # Detokenize the program
-                self.send_status("DETOKENIZING...")
-                from basic_tokenizer_streaming import detokenize_program
-                try:
-                    source = detokenize_program(bytes(all_bytes))
-                    return f"Current BASIC program ({prog_size} bytes):\n\n{source}"
-                except Exception as e:
-                    return f"Detokenize error: {str(e)}\nRaw bytes: {all_bytes[:50]}..."
-
-            except Exception as e:
-                self.send_status("READ FAILED")
-                return f"ERROR reading program: {str(e)}"
-
-        else:
-            return f"ERROR: Unknown tool: {tool_name}"
-
-    def _estimate_tokens(self, messages: List[Dict]) -> int:
-        """Estimate token count for messages (rough: ~4 chars per token)."""
-        total_chars = 0
-        for msg in messages:
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                total_chars += len(content)
-            elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict):
-                        if "text" in block:
-                            total_chars += len(block["text"])
-                        elif "content" in block:
-                            total_chars += len(str(block["content"]))
-                        elif "input" in block:
-                            total_chars += len(json.dumps(block["input"]))
-        return total_chars // 4
-
-    def _compact_conversation(self, model: str) -> bool:
-        """
-        Compact conversation by summarizing older messages.
-        Returns True if compaction was performed.
-        """
-        if not self.client:
-            return False
-
-        estimated = self._estimate_tokens(self.conversation)
-        if estimated < self.compact_threshold:
-            return False
-
-        self.send_status("COMPACTING MEMORY...")
-        print(f"[Agent] Compacting conversation: ~{estimated} tokens")
-
-        # Keep the most recent messages (last 10 or so)
-        keep_recent = 10
-        if len(self.conversation) <= keep_recent:
-            return False
-
-        old_messages = self.conversation[:-keep_recent]
-        recent_messages = self.conversation[-keep_recent:]
-
-        # Summarize the old messages
-        summary_prompt = """Summarize this conversation history concisely.
-Focus on:
-- What the user originally requested
-- Key decisions made
-- Code that was written/tested
-- Current state of the Apple II and emulator
-- Any errors encountered and how they were resolved
-
-Be concise but preserve important technical details."""
-
-        try:
-            # Format old messages for summarization
-            old_text = ""
-            for msg in old_messages:
-                role = msg.get("role", "unknown")
-                content = msg.get("content", "")
-                if isinstance(content, str):
-                    old_text += f"{role.upper()}: {content}\n\n"
-                elif isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict):
-                            if "text" in block:
-                                old_text += f"{role.upper()}: {block['text']}\n\n"
-                            elif block.get("type") == "tool_use":
-                                old_text += f"{role.upper()}: [Used tool: {block.get('name')}]\n\n"
-                            elif block.get("type") == "tool_result":
-                                result = block.get("content", "")[:500]
-                                old_text += f"TOOL RESULT: {result}...\n\n"
-
-            response = self._api_call_with_retry(
-                model=model,
-                max_tokens=2000,
-                messages=[{
-                    "role": "user",
-                    "content": f"{summary_prompt}\n\n---\n\n{old_text}"
-                }]
-            )
-
-            summary = response.content[0].text
-
-            # Replace conversation with summary + recent messages
-            self.conversation = [
-                {
-                    "role": "user",
-                    "content": f"[CONVERSATION SUMMARY]\n{summary}\n[END SUMMARY - Recent messages follow]"
-                },
-                {
-                    "role": "assistant",
-                    "content": "I understand the context from our previous conversation. Let me continue from where we left off."
-                }
-            ] + recent_messages
-
-            new_estimate = self._estimate_tokens(self.conversation)
-            print(f"[Agent] Compacted: ~{estimated} -> ~{new_estimate} tokens")
-            self.send_status("MEMORY COMPACTED")
-            return True
-
-        except Exception as e:
-            print(f"[Agent] Compaction failed: {e}")
-            return False
-
-    def _api_call_with_retry(self, max_retries=3, **kwargs):
-        """Make an API call with retry for rate limits and overload."""
-        for attempt in range(max_retries + 1):
-            try:
-                return self.client.messages.create(**kwargs)
-            except anthropic.RateLimitError as e:
-                if attempt < max_retries:
-                    try:
-                        retry_after = int(e.response.headers.get('retry-after', 0))
-                    except (ValueError, AttributeError):
-                        retry_after = 0
-                    if retry_after < 1:
-                        retry_after = min(2 ** (attempt + 1), 60)
-                    self.send_status(f"RATE LIMITED - RETRY {retry_after}S")
-                    self._stream(f"  (rate limited, waiting {retry_after}s)")
-                    time.sleep(retry_after)
-                else:
-                    raise
-            except anthropic.APIStatusError as e:
-                if e.status_code == 529 and attempt < max_retries:
-                    wait = min(2 ** (attempt + 1), 60)
-                    self.send_status(f"API BUSY - RETRY {wait}S")
-                    self._stream(f"  (overloaded, waiting {wait}s)")
-                    time.sleep(wait)
-                else:
-                    raise
-        raise Exception("API call failed after retries")
-
-    def _prepare_cached_messages(self, messages):
-        """Add cache_control breakpoint to messages for prompt caching.
-
-        Marks the second-to-last message so everything before it is cached.
-        Each turn, only the newest content (last response + new message) is uncached.
-        """
-        if len(messages) < 4:
-            return messages
-
-        # Shallow copy list, modify only the target message
-        cached = list(messages)
-        idx = len(cached) - 2
-        target = cached[idx]
-        content = target.get("content", "")
-
-        if isinstance(content, str):
-            cached[idx] = {
-                **target,
-                "content": [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
-            }
-        elif isinstance(content, list) and content:
-            new_content = list(content)
-            last_block = new_content[-1]
-            if isinstance(last_block, dict):
-                new_content[-1] = {**last_block, "cache_control": {"type": "ephemeral"}}
-                cached[idx] = {**target, "content": new_content}
-
-        return cached
+    def _elapsed(self) -> str:
+        total = int(time.time() - self._session_start) if self._session_start else 0
+        return f"{total // 60}M{total % 60:02d}S" if total >= 60 else f"{total}S"
 
     def _start_heartbeat(self):
-        """Start background heartbeat thread to keep Apple II TCP alive.
-
-        Wraps send_status with a lock so heartbeat and main thread don't
-        interleave socket writes.
-        """
         self._heartbeat_running = True
-        self._last_send_time = time.time()
-        self._original_send_status = self.send_status
-
-        # Replace send_status with thread-safe version
-        def locked_send(msg):
-            with self._send_lock:
-                self._original_send_status(msg)
-                self._last_send_time = time.time()
-        self.send_status = locked_send
-
-        self._heartbeat_thread = threading.Thread(
-            target=self._heartbeat_loop, daemon=True
-        )
+        self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
         self._heartbeat_thread.start()
 
     def _stop_heartbeat(self):
-        """Stop background heartbeat thread and restore send_status."""
         self._heartbeat_running = False
         if self._heartbeat_thread:
             self._heartbeat_thread.join(timeout=5)
             self._heartbeat_thread = None
-        # Restore original (unwrapped) send_status
-        if hasattr(self, '_original_send_status'):
-            self.send_status = self._original_send_status
-
-    def _shutdown_test_emulator(self):
-        """Shut down the bridge's test emulator to free CPU.
-
-        The bridge boots a separate Bobbin process for testing code.
-        We shut it down after each agentic loop so it doesn't eat CPU
-        while idle. The next test will auto-boot a fresh one.
-        """
-        if not self.mcp_call:
-            return
-        try:
-            # Import here to avoid circular imports
-            from emulator_bridge import get_bridge
-            bridge = get_bridge()
-            if bridge.emulator_running:
-                bridge.shutdown()
-                print("[Bridge] Test emulator shut down (CPU freed)")
-        except Exception:
-            pass
 
     def _heartbeat_loop(self):
-        """Send periodic heartbeat to keep Apple II TCP alive and show progress."""
+        """Keep the status line ticking (and the TCP connection busy)."""
         while self._heartbeat_running:
-            time.sleep(2)
-            if not self._heartbeat_running:
-                break
-            # Don't send heartbeat during code deployment - interleaved
-            # STATUS packets cause the agent to drop CODE packets
-            if self._heartbeat_paused:
-                continue
-            # Only send heartbeat if no other message was sent recently
-            if time.time() - self._last_send_time > 1.5:
-                try:
-                    now = time.time()
-                    total = int(now - getattr(self, '_session_start', now))
-                    phase = self._phase
-                    turn = self._current_turn
-                    max_t = self._max_turns
-                    # Format: "THINKING.. (1M05S * T2/20)"
-                    mins = total // 60
-                    secs = total % 60
-                    if mins > 0:
-                        t_str = f"{mins}M{secs:02d}S"
-                    else:
-                        t_str = f"{secs}S"
-                    # Truncate phase to fit screen width
-                    screen_width = self.display_width + 1
-                    max_phase = screen_width - len(t_str) - len(f" * T{turn}/{max_t}") - 5
-                    if len(phase) > max_phase:
-                        phase = phase[:max_phase] + ".."
-                    msg = f"{phase} ({t_str} * T{turn}/{max_t})"
-                    self.send_status(msg)
-                except Exception:
-                    pass  # Connection may be dead - let main loop handle it
+            time.sleep(1.0)
+            if self._heartbeat_running and time.time() - self._last_status > 1.8:
+                self._status(f"{self._phase} {self._elapsed()}")
 
-    def run_agentic(self, user_message: str, model: str = "claude-sonnet-4-20250514",
-                    max_turns: int = 50) -> str:
-        """
-        Run the agentic loop.
+    # ------------------------------------------------------------------
+    # Public API used by the proxy
+    # ------------------------------------------------------------------
 
-        Args:
-            user_message: The user's request
-            model: Model to use
-            max_turns: Maximum number of agentic turns
+    def set_custom_prompt(self, prompt: Optional[str]):
+        self.custom_prompt = prompt
 
-        Returns:
-            Final response text
-        """
-        if not self.client:
-            return "ERROR: No API key. Export ANTHROPIC_API_KEY."
-
-        # Track last user message for checkpoint descriptions
-        self._last_user_message = user_message
-
-        # Add user message to conversation
-        self.conversation.append({
-            "role": "user",
-            "content": user_message
-        })
-
-        system_prompt = """You are Apple II Agent - an expert AI programmer that creates code for Apple II.
-
-SESSION PERSISTENCE:
-- You have MEMORY! Conversation history is preserved across reconnects.
-- When user says "& to return" and comes back, you remember what you discussed.
-- If user reports an error, you remember what code you wrote!
-- Use emulator_read_basic_program to see EXACTLY what's in memory if needed.
-- /RESET command clears your memory and starts fresh.
-
-CHOOSING LANGUAGE:
-- If user says "BASIC" or doesn't specify: use Applesoft BASIC
-- If user says "assembly", "machine language", "ML", "6502", "fast": use 6502 assembly
-- For games that need speed (shooters, action): suggest assembly
-- For utilities, demos, simple programs: BASIC is fine
-
-ERROR HANDLING:
-- If user reports "SYNTAX ERROR IN LINE XX", you remember the code you wrote!
-- First try to fix from memory. If unclear, use emulator_read_basic_program.
-- Common errors: missing quotes, wrong keyword, NEXT without FOR, etc.
-
-WORKFLOW - SIMPLE vs COMPLEX programs:
-
-FOR SIMPLE PROGRAMS (counting, hello world, basic math, simple loops, INPUT/PRINT):
-1. Write the code
-2. Deploy directly with apple2_send_code - NO EMULATOR NEEDED!
-3. Tell user: "TYPE /EXIT THEN RUN"
-Simple programs don't need testing - just send them!
-
-FOR COMPLEX PROGRAMS (graphics, games, multi-screen, tricky logic, assembly):
-1. Use emulator_load_env (instant!) - NOT emulator_boot (slow!)
-   - emulator_load_env env="basic" - bare BASIC (default, good for most programs)
-   - emulator_load_env env="prodos" - ProDOS BASIC (for disk operations like PREFIX, CAT)
-   - emulator_load_env env="dos33" - DOS 3.3 BASIC (for CATALOG, SAVE, LOAD)
-2. Inject and test the code
-3. Read screen to verify output - USER SEES THIS OUTPUT!
-4. Fix bugs if needed
-5. Deploy to Apple II
-6. Tell user it's ready
-
-STATUS UPDATES - User sees these in real-time:
-- "WRITING: COUNTING LOOP"
-- "DEPLOYING TO APPLE II..."
-- "READY! TYPE /EXIT THEN RUN"
-For complex programs:
-- "INSTANT LOAD..." (emulator_load_env)
-- "TESTING..."
-- "--- EMULATOR OUTPUT ---" (show what you see!)
-- "TEST PASSED!"
-
-BASIC TOOLS:
-- apple2_send_code: Deploy BASIC to Apple II (USE THIS FOR SIMPLE PROGRAMS!)
-- emulator_inject_basic: Load BASIC into emulator (for testing)
-- emulator_run_basic: Run BASIC commands in emulator
-
-ASSEMBLY/MACHINE LANGUAGE TOOLS:
-- emulator_assemble: Assemble 6502 code, load into emulator
-- emulator_call: Execute machine code routine
-- apple2_send_binary: Deploy binary to Apple II
-
-EMULATOR TOOLS (only for complex programs!):
-- emulator_load_env: INSTANT emulator ready (use this, not boot!)
-  - env="basic": bare BASIC, no DOS (default)
-  - env="prodos": ProDOS BASIC with disk commands
-  - env="dos33": DOS 3.3 BASIC with CATALOG/SAVE/LOAD
-- emulator_boot: SLOW cold boot (avoid unless you need a specific disk)
-- emulator_read_screen: Check text output - SHOWS OUTPUT TO USER!
-- emulator_capture_graphics: See graphics (gr/hgr)
-
-OTHER TOOLS:
-- apple2_send_status: Update status line
-- disk_save_basic: Save program to disk
-- disk_list: List files on disk
-
-6502 ASSEMBLY TIPS (ca65 format):
-- Use .org $6000 for load address
-- End with RTS to return cleanly
-- Key addresses: $400=text screen, $2000=HGR page 1
-- COUT=$FDED, HOME=$FC58, GR=$FB40, HGR=$F3E2
-
-SYSTEM ARTIFACTS vs USER REQUESTS:
-- You are connected to a real Apple II via Ethernet. Messages come from whatever the user types.
-- Sometimes you'll receive system artifacts that are NOT user requests. Examples:
-  - "RUN AGENT.BIN", "BRUN AGENT.BIN", "CALL 24576" - these are boot artifacts
-  - "BLOAD ...", "CATALOG", "PREFIX" - ProDOS commands, not requests for you
-  - Any message that looks like a DOS/ProDOS command rather than natural language
-- For these, respond briefly: "READY! WHAT WOULD YOU LIKE TO BUILD?" - do NOT try to execute them!
-- NEVER generate code that runs AGENT.BIN, CALL 24576, or BLOAD AGENT - this re-enters the agent recursively!
-- Real user requests are natural language: "make a game", "draw a circle", "fix this error"
-
-CRITICAL RULES:
-1. SIMPLE PROGRAMS: Skip emulator! Just deploy with apple2_send_code
-2. COMPLEX PROGRAMS: Use emulator_load_env (instant), not emulator_boot (slow)
-3. When you read emulator screen, the user sees it too!
-4. After deploy: "TYPE /EXIT THEN RUN" (BASIC) or "TYPE /EXIT THEN CALL 24576" (ML)
-5. {case_rule}
-6. NEVER re-launch AGENT.BIN - you ARE the agent!
-
-You are the user's AI programming partner. Be FAST for simple stuff!"""
-
-        # Set case rule based on display mode
-        case_rule = "Keep messages UPPERCASE" if self.display_uppercase else "Use natural mixed case"
-        system_prompt = system_prompt.replace("{case_rule}", case_rule)
-
-        # Append custom prompt if set
-        if self.custom_prompt:
-            system_prompt += f"\n\nUSER CONTEXT/INSTRUCTIONS:\n{self.custom_prompt}"
-
-        self.send_status("THINKING...")
-        self._session_start = time.time()
-
-        # Start continuous heartbeat to keep Apple II TCP alive
-        self._start_heartbeat()
-        try:
-            return self._run_agentic_loop(model, system_prompt, max_turns)
-        finally:
-            self._stop_heartbeat()
-            self._shutdown_test_emulator()
-
-    def _run_agentic_loop(self, model, system_prompt, max_turns):
-        """Inner agentic loop (runs with heartbeat active)."""
-        self._max_turns = max_turns
-        for turn in range(max_turns):
-            self._current_turn = turn + 1
-            self._phase = "THINKING"
-            self._phase_start = time.time()
-
-            # Show turn progress
-            self.send_status(f"T{turn+1}/{max_turns}: CALLING CLAUDE...")
-            self._stream(f"--- TURN {turn+1}/{max_turns} ---")
-
-            # Check if we need to compact the conversation
-            self._compact_conversation(model)
-
-            try:
-                # Build tools with prompt caching on last regular tool
-                all_tools = list(APPLE2_TOOLS)
-                all_tools[-1] = {**all_tools[-1], "cache_control": {"type": "ephemeral"}}
-                all_tools.append({"type": "web_search_20250305", "name": "web_search", "max_uses": 3})
-
-                # System prompt with caching (static across all turns)
-                cached_system = [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}]
-
-                # Conversation with cache breakpoint on recent history
-                cached_messages = self._prepare_cached_messages(self.conversation)
-
-                response = self._api_call_with_retry(
-                    model=model,
-                    max_tokens=4096,
-                    system=cached_system,
-                    tools=all_tools,
-                    messages=cached_messages,
-                    extra_headers={"anthropic-beta": "web-search-2025-03-05"}
-                )
-
-                # API call complete - update phase
-                elapsed = int(time.time() - self._phase_start)
-                if response.stop_reason == "tool_use":
-                    self._phase = "USING TOOLS"
-                else:
-                    self._phase = "COMPOSING REPLY"
-                self._phase_start = time.time()
-                self.send_status(f"T{self._current_turn}: CLAUDE RESPONDED ({elapsed}S)")
-                # Also show in scroll area with token usage
-                usage = getattr(response, 'usage', None)
-                if usage:
-                    in_tok = getattr(usage, 'input_tokens', 0)
-                    out_tok = getattr(usage, 'output_tokens', 0)
-                    cache_read = getattr(usage, 'cache_read_input_tokens', 0)
-                    cache_write = getattr(usage, 'cache_creation_input_tokens', 0)
-                    if cache_read:
-                        tok_str = f"{in_tok//1000}K+{cache_read//1000}KC IN {out_tok//1000}K OUT"
-                    else:
-                        tok_str = f"{in_tok//1000}K IN {out_tok//1000}K OUT"
-                    self._stream(f"  THOUGHT {elapsed}S * {tok_str}")
-                    # Log cache effectiveness
-                    if cache_read or cache_write:
-                        print(f"[Agent] Cache: {cache_read} read, {cache_write} written, {in_tok} uncached")
-
-                # Process response
-                assistant_content = []
-                final_text = ""
-
-                for block in response.content:
-                    if block.type == "text":
-                        final_text += block.text
-                        assistant_content.append({
-                            "type": "text",
-                            "text": block.text
-                        })
-                        # Show Claude's text in scrolling output
-                        # Word-wrap for display
-                        thinking_lines = []
-                        for line in block.text.strip().split('\n'):
-                            stripped = self._format_text(line.strip())
-                            if not stripped:
-                                continue
-                            thinking_lines.append(stripped)
-                            for wrapped in self._word_wrap(stripped):
-                                self._stream(wrapped)
-                        # Also update status line with first line
-                        snippet = self._format_text(thinking_lines[0][:35]) if thinking_lines else ""
-                        if snippet and response.stop_reason == "tool_use":
-                            self._phase = snippet
-                            self.send_status(f"T{self._current_turn}: {snippet}")
-
-                    elif block.type == "server_tool_use":
-                        # Server-side web search - handled automatically by API
-                        self.send_status("SEARCHING WEB...")
-                        self._stream("> SEARCHING WEB...")
-                        assistant_content.append(block)
-
-                    elif block.type == "web_search_tool_result":
-                        # Web search results - handled automatically by API
-                        self.send_status("GOT SEARCH RESULTS")
-                        self._stream("  GOT SEARCH RESULTS")
-                        assistant_content.append(block)
-
-                    elif block.type == "tool_use":
-                        tool_name = block.name
-                        tool_input = block.input
-                        tool_id = block.id
-
-                        # Update phase and status with friendly name
-                        friendly_names = {
-                            "emulator_boot": "BOOTING EMULATOR",
-                            "emulator_load_env": "LOADING EMULATOR",
-                            "emulator_type": "TYPING IN EMULATOR",
-                            "emulator_read_screen": "READING SCREEN",
-                            "emulator_run_basic": "RUNNING BASIC",
-                            "emulator_inject_basic": "INJECTING PROGRAM",
-                            "emulator_capture_graphics": "CAPTURING GFX",
-                            "emulator_peek": "READING MEMORY",
-                            "emulator_poke": "WRITING MEMORY",
-                            "emulator_assemble": "ASSEMBLING 6502",
-                            "emulator_call": "EXECUTING CODE",
-                            "emulator_read_basic_program": "READING PROGRAM",
-                            "apple2_send_code": "DEPLOYING CODE",
-                            "apple2_send_binary": "DEPLOYING BINARY",
-                            "apple2_send_message": "SENDING TO APPLE",
-                            "apple2_send_status": "STATUS UPDATE",
-                            "disk_save_basic": "SAVING TO DISK",
-                            "disk_save_binary": "SAVING BINARY",
-                            "disk_save_text": "SAVING TEXT",
-                            "disk_list": "LISTING DISK",
-                        }
-                        friendly = friendly_names.get(tool_name, tool_name.upper())
-                        self._phase = friendly
-                        self._phase_start = time.time()
-                        turn = self._current_turn
-                        # Skip showing status for apple2_send_status since it sends its own
-                        if tool_name != "apple2_send_status":
-                            self.send_status(f"T{turn}: {friendly}...")
-                            # Show tool call with key params (like Claude Code)
-                            param_hint = self._tool_param_hint(tool_name, tool_input)
-                            if param_hint:
-                                self._stream(f"* {friendly} ({param_hint})")
-                            else:
-                                self._stream(f"* {friendly}")
-
-                        assistant_content.append({
-                            "type": "tool_use",
-                            "id": tool_id,
-                            "name": tool_name,
-                            "input": tool_input
-                        })
-
-                        # Execute tool
-                        result = self._execute_tool(tool_name, tool_input)
-
-                        # Stream tool result to Apple II
-                        if result and tool_name != "apple2_send_status":
-                            if tool_name in ('emulator_read_screen', 'emulator_run_basic', 'emulator_capture_graphics'):
-                                # Show emulator screen content so user can follow along
-                                self._stream_emulator_screen(result)
-                            else:
-                                result_preview = self._format_text(result.strip().split('\n')[0][:37])
-                                if result_preview and result_preview != "OK":
-                                    self._stream(f"  {result_preview}")
-
-                        # Add assistant message and tool result
-                        self.conversation.append({
-                            "role": "assistant",
-                            "content": assistant_content
-                        })
-                        self.conversation.append({
-                            "role": "user",
-                            "content": [{
-                                "type": "tool_result",
-                                "tool_use_id": tool_id,
-                                "content": result
-                            }]
-                        })
-
-                        # Continue the loop
-                        assistant_content = []
-                        break
-
-                # If no tool use, we're done
-                if response.stop_reason == "end_turn":
-                    self.conversation.append({
-                        "role": "assistant",
-                        "content": assistant_content
-                    })
-                    self._stream("--- COMPLETE ---")
-                    self.send_status("DONE")
-                    return self._format_text(final_text)
-
-                # If stop reason is tool_use, continue loop
-                if response.stop_reason != "tool_use":
-                    break
-
-            except anthropic.RateLimitError:
-                self.send_status("RATE LIMITED")
-                return "ERROR: RATE LIMITED AFTER 3 RETRIES. WAIT A MINUTE AND TRY AGAIN."
-            except Exception as e:
-                error_msg = str(e)
-                # Provide clean error messages for common API errors
-                if "credit" in error_msg.lower() or "balance" in error_msg.lower():
-                    self.send_status("NO API CREDITS")
-                    return "ERROR: API CREDITS DEPLETED. ADD CREDITS TO YOUR ANTHROPIC ACCOUNT."
-                elif "rate" in error_msg.lower() and "limit" in error_msg.lower():
-                    self.send_status("RATE LIMITED")
-                    return "ERROR: RATE LIMITED AFTER RETRIES. WAIT A MINUTE AND TRY AGAIN."
-                elif "authentication" in error_msg.lower() or "api_key" in error_msg.lower():
-                    self.send_status("BAD API KEY")
-                    return "ERROR: INVALID API KEY. CHECK ANTHROPIC_API_KEY."
-                else:
-                    self.send_status(f"ERROR: {error_msg[:20]}")
-                    return f"ERROR: {error_msg[:100]}"
-
-        self.send_status("DONE")
-        return "MAX TURNS REACHED"
+    def clear_custom_prompt(self):
+        self.custom_prompt = None
 
     def clear_conversation(self):
-        """Clear conversation history."""
         self.conversation = []
+        self._machine_note_sent = None
+
+    def request_stop(self):
+        """Stop the current request (called from the session's thread).
+
+        Closing the stream ends a long silent think at once; otherwise the
+        loop stops at its next stream event or between tool steps.
+        """
+        self._stop_requested = True
+        self._phase = "STOPPING"
+        stream = self._active_stream
+        if stream is not None:
+            interrupted = _shut_down_stream_socket(stream)
+            print(f"[Agent] stop requested ({'stream interrupted' if interrupted else 'stops at the next event'})")
+        else:
+            print("[Agent] stop requested")
+
+    def run_agentic(self, user_message: str, model: str = MODEL_IDS[MODEL_OPUS],
+                    max_turns: int = 50) -> None:
+        """Handle one user message end to end. Output goes to the Apple II."""
+        if not self.client:
+            self._line("NO API KEY - PUT ANTHROPIC_API_KEY IN PROXY/.ENV")
+            return
+
+        self._session_start = time.time()
+        self._previews_allowed = True
+        self._stop_requested = False
+        self._final_text = ""
+        deploys_before = len(self.deploy_history)
+        text = self._machine_note() + user_message
+        last = self.conversation[-1] if self.conversation else None
+        if last and last["role"] == "user":
+            # A stopped request left the conversation on a user turn
+            content = last["content"]
+            if isinstance(content, str):
+                content = [{"type": "text", "text": content}]
+            last["content"] = list(content) + [{"type": "text", "text": text}]
+        else:
+            self.conversation.append({"role": "user", "content": text})
+        self._start_heartbeat()
+        try:
+            self._loop(model, max_turns)
+            self._last_request_deployed = len(self.deploy_history) > deploys_before
+            if self._last_request_deployed and self._final_text.strip():
+                self._closing_card(self._final_text)
+        finally:
+            self._stop_heartbeat()
+            self._wait_preview()
+            self._shutdown_test_emulator()
+
+    # ------------------------------------------------------------------
+    # The loop
+    # ------------------------------------------------------------------
+
+    def _machine_note(self) -> str:
+        """Tell Claude about this Apple II when it changes (rides in the user turn)."""
+        has_aux = self._has_aux()
+        note = (f"Apple II: {'128K' if has_aux else '64K'}, "
+                f"{self.display_width + 1}-column {'uppercase' if self.display_uppercase else 'mixed-case'} display"
+                + (" for this log (programs still start in 40-column text)" if self.display_width > 39 else "")
+                + ("" if self._can_deploy() else ", OLD AGENT.BIN (BASIC deploys only)"))
+        if note == self._machine_note_sent:
+            return ""
+        self._machine_note_sent = note
+        return f"[{note}]\n"
+
+    def _system(self) -> List[Dict[str, Any]]:
+        has_aux = self._has_aux()
+        machine = ("Apple //e enhanced with 128K, 65C02 CPU. While your program runs the agent waits "
+                   "in aux memory, so main memory is yours."
+                   if has_aux else
+                   "Apple //e with 64K. The agent stays in memory at $6000-$BFFF while your program runs.")
+        memory = "$0800-$BEFF" if has_aux else "$0800-$5FFF only (this machine has no room above)"
+        case_rule = ("The screen shows UPPERCASE only." if self.display_uppercase
+                     else "Mixed case displays fine.")
+        text = SYSTEM_PROMPT
+        for key, value in (("{cols}", str(self.display_width + 1)), ("{case_rule}", case_rule),
+                           ("{machine}", machine), ("{memory}", memory)):
+            text = text.replace(key, value)
+        if self.custom_prompt:
+            text += f"\n\nTHE USER'S STANDING INSTRUCTIONS\n{self.custom_prompt}"
+        return [{"type": "text", "text": text}]
+
+    def _tools(self, streaming: bool) -> List[Dict[str, Any]]:
+        tools = [dict(t, eager_input_streaming=True) if streaming else dict(t) for t in TOOLS]
+        tools.append({"type": "web_search_20260209", "name": "web_search", "max_uses": 3})
+        return tools
+
+    def _loop(self, model: str, max_turns: int):
+        json_retries = 0
+        max_token_retries = 0
+        for turn in range(max_turns):
+            self._turn = turn + 1
+            if self._stop_requested:
+                self._line("STOPPED.")
+                break
+            self._set_phase("THINKING")
+            if self._stop_requested:            # stopped while the phase was set
+                self._line("STOPPED.")
+                break
+            try:
+                response = self._stream_turn(model)
+                json_retries = 0
+            except StopRequested:
+                print("[Agent] stopped")
+                self._line("")
+                self._line("STOPPED.")
+                break
+            except ValueError as e:
+                # Tool input JSON the SDK couldn't parse at all - ask again
+                json_retries += 1
+                print(f"[Agent] bad tool JSON ({e}), retry {json_retries}")
+                if json_retries > 2:
+                    self._line("SORRY - SOMETHING WENT WRONG. TRY AGAIN?")
+                    break
+                continue
+            except anthropic.AuthenticationError:
+                self._line("THE API KEY WAS REJECTED. CHECK PROXY/.ENV")
+                break
+            except anthropic.RateLimitError:
+                self._line("CLAUDE IS RATE LIMITED RIGHT NOW. WAIT A MINUTE AND TRY AGAIN.")
+                break
+            except anthropic.APIStatusError as e:
+                msg = str(getattr(e, "message", e))
+                if "credit" in msg.lower() or "balance" in msg.lower():
+                    self._line("OUT OF API CREDITS - ADD CREDITS TO YOUR ANTHROPIC ACCOUNT.")
+                else:
+                    self._line(f"API ERROR {e.status_code}: {msg[:120]}")
+                print(f"[Agent] API error: {e}")
+                break
+            except anthropic.APIConnectionError:
+                self._line("CAN'T REACH CLAUDE - IS THE INTERNET UP?")
+                break
+
+            self.conversation.append({"role": "assistant", "content": response.content})
+            self._log_usage(response)
+            stop = response.stop_reason
+
+            if stop == "pause_turn":
+                continue
+            if stop == "refusal":
+                self._line("SORRY, I CAN'T HELP WITH THAT ONE.")
+                break
+
+            tool_uses = [b for b in response.content if b.type == "tool_use"]
+            if not tool_uses and stop == "max_tokens" and max_token_retries < MAX_TOKEN_RETRIES:
+                # Cut off before doing anything (a long think): leave that turn
+                # out (a half-finished thinking block can't go back) and ask
+                # for a shorter plan and the program in parts
+                max_token_retries += 1
+                self.conversation.pop()
+                print(f"[Agent] T{self._turn} hit max_tokens with nothing done - retry {max_token_retries}")
+                self._line("")
+                self._line("(THAT PLAN GOT TOO BIG - STARTING SMALLER)")
+                self.conversation.append({"role": "user", "content": [{"type": "text", "text": (
+                    "(From the proxy: your last response ran out of output tokens while you were still "
+                    "planning, before you called any tool, so it was discarded. Keep the plan short: write "
+                    "a first playable version now with write_file, then grow it with edit_file and test "
+                    "as you go.)")}]})
+                continue
+            if not tool_uses:
+                if stop == "max_tokens":
+                    self._line("(MY REPLY GOT CUT OFF)")
+                else:
+                    self._final_text = "".join(b.text for b in response.content if b.type == "text")
+                break
+
+            results = []
+            for block in tool_uses:
+                if self._stop_requested:
+                    results.append(self._error_result(block.id, "Not run: the user stopped this request."))
+                elif stop == "max_tokens":
+                    results.append(self._error_result(
+                        block.id, "Not run: your response hit max_tokens and this tool call was cut off. "
+                                  "Write large programs in parts (write_file the first part, then "
+                                  "edit_file to append the rest)."))
+                else:
+                    results.append(self._run_tool(block))
+            self.conversation.append({"role": "user", "content": results})
+            if self._stop_requested:
+                self._line("STOPPED.")
+                break
+        else:
+            self._line("(I RAN OUT OF STEPS - SAY 'CONTINUE' TO KEEP GOING)")
+
+    def _request_params(self, model: str) -> Dict[str, Any]:
+        is_haiku = "haiku" in model
+        betas = []
+        params: Dict[str, Any] = {
+            "model": model,
+            "max_tokens": MAX_TOKENS,
+            "system": self._system(),
+            "tools": self._tools(streaming=True),
+            "messages": self.conversation,
+            "output_config": {"effort": self.effort},
+            "thinking": {"type": "adaptive"},
+        }
+        if "cache" not in self._disabled:
+            params["cache_control"] = {"type": "ephemeral"}
+        if "updates" not in self._disabled and not is_haiku:
+            # "summarized", not "updates": under "updates" the up-front
+            # reasoning comes back empty, and a big request's first think can
+            # run ten minutes with nothing on the Apple II but a timer
+            params["thinking"] = {"type": "adaptive", "display": "summarized"}
+        if "fallbacks" not in self._disabled and not is_haiku:
+            params["fallbacks"] = "default"
+            betas.append(BETA_FALLBACK)
+        if "compaction" not in self._disabled:
+            params["context_management"] = {"edits": [{"type": "compact_20260112"}]}
+            betas.append(BETA_COMPACT)
+        if betas:
+            params["betas"] = betas
+        return params
+
+    def _stream_turn(self, model: str):
+        """One API call, streamed to the Apple II as it arrives."""
+        for attempt in range(4):
+            params = self._request_params(model)
+            try:
+                return self._consume_stream(params)
+            except anthropic.BadRequestError as e:
+                # An optional feature this model/account doesn't take? Drop it, retry.
+                msg = str(getattr(e, "message", e)).lower()
+                for feature, words in (("fallbacks", ("fallback",)),
+                                       ("compaction", ("context_management", "compact")),
+                                       ("updates", ("display", "thinking-display")),
+                                       ("cache", ("cache_control",))):
+                    if feature not in self._disabled and any(w in msg for w in words):
+                        print(f"[Agent] API refused {feature}: {msg[:160]} - retrying without it")
+                        self._disabled.add(feature)
+                        break
+                else:
+                    raise
+        raise RuntimeError("API kept refusing the request")
+
+    def _consume_stream(self, params: Dict[str, Any]):
+        self._text_buf = ""
+        self._think_buf = ""
+        try:
+            return self._consume_open_stream(params)
+        except StopRequested:
+            raise
+        except Exception as e:
+            if self._stop_requested:            # request_stop() closed the stream
+                print(f"[Agent] stream ended by the stop: {type(e).__name__}")
+                raise StopRequested()
+            raise
+        finally:
+            self._active_stream = None
+
+    def _consume_open_stream(self, params: Dict[str, Any]):
+        with self.client.beta.messages.stream(**params) as stream:
+            self._active_stream = stream
+            if self._stop_requested:
+                raise StopRequested()
+            for event in stream:
+                if self._stop_requested:
+                    raise StopRequested()       # leaves the unfinished turn out
+                etype = event.type
+                if etype == "content_block_start":
+                    block = event.content_block
+                    if block.type == "tool_use":
+                        self._on_tool_start(block.name)
+                    elif block.type == "server_tool_use":
+                        self._set_phase("SEARCHING THE WEB")
+                        self._line("* SEARCHING THE WEB")
+                    elif block.type == "text":
+                        self._set_phase("WRITING A REPLY")
+                    elif block.type == "thinking":
+                        self._think_buf = ""
+                        self._think_shown = False
+                elif etype == "text":
+                    self._feed_text(event.text)
+                elif etype == "thinking":
+                    self._feed_thinking(event.thinking)
+                elif etype == "input_json":
+                    self._on_tool_input(event.partial_json)
+                elif etype == "content_block_stop":
+                    block = event.content_block
+                    if block.type == "thinking":
+                        self._flush_thinking()
+                    elif block.type == "text":
+                        self._flush_text()
+            return stream.get_final_message()
+
+    def _log_usage(self, response):
+        u = getattr(response, "usage", None)
+        if u:
+            print(f"[Agent] T{self._turn} {response.stop_reason}: in={u.input_tokens} "
+                  f"cache_read={getattr(u, 'cache_read_input_tokens', 0)} "
+                  f"cache_write={getattr(u, 'cache_creation_input_tokens', 0)} out={u.output_tokens}")
+
+    # ------------------------------------------------------------------
+    # Live display of the stream
+    # ------------------------------------------------------------------
+
+    # Progress notes (thinking display "updates") scroll by line by line as
+    # they stream in - a long think must not look like a hang
+    def _feed_thinking(self, chunk: str):
+        self._think_buf += chunk
+        while "\n" in self._think_buf:
+            line, self._think_buf = self._think_buf.split("\n", 1)
+            self._progress_line(line)
+
+    def _flush_thinking(self):
+        self._progress_line(self._think_buf)
+        self._think_buf = ""
+
+    def _progress_line(self, line: str):
+        line = line.strip()
+        if not line or line == "This part of the response was interrupted before it finished.":
+            return
+        if not self._think_shown:
+            self._line("")
+            self._think_shown = True
+        # Each paragraph of the thinking summary gets a few lines at most,
+        # "- " and a hanging indent: easy to follow, not a wall of text (tool
+        # steps are "* ")
+        wrapped = word_wrap(apple_text(line, False), self.display_width - 2)
+        if len(wrapped) > THINK_MAX_LINES:
+            wrapped = wrapped[:THINK_MAX_LINES]
+            wrapped[-1] = wrapped[-1][:self.display_width - 5].rstrip() + "..."
+        for i, row in enumerate(wrapped):
+            self._line(("- " if i == 0 else "  ") + row)
+
+    def _feed_text(self, chunk: str):
+        self._text_buf += chunk
+        while "\n" in self._text_buf:
+            line, self._text_buf = self._text_buf.split("\n", 1)
+            self._line(line)
+
+    def _flush_text(self):
+        if self._text_buf.strip():
+            self._line(self._text_buf)
+        self._text_buf = ""
+
+    def _on_tool_start(self, name: str):
+        label = TOOL_LABELS.get(name, name.upper())
+        self._set_phase(label)
+        self._code_lines_shown = 0
+        self._code_last_show = 0.0
+        self._writing_name = ""
+        self._tool_streaming = name
+        self._tool_json = ""
+        if name == "write_file":
+            self._line("")
+            self._line("* WRITING CODE")
+
+    def _on_tool_input(self, partial_json: str):
+        """While write_file streams in, scroll some of the code past the user.
+
+        Parses the raw JSON so far with trailing strings kept: the SDK's own
+        snapshot leaves out a string until its closing quote, which for a
+        program means until the whole file has arrived.
+        """
+        if self._tool_streaming != "write_file":
+            return
+        self._tool_json += partial_json
+        now = time.time()
+        if now - self._code_last_show < 0.35:
+            return
+        try:
+            snapshot = from_json(self._tool_json.encode(), partial_mode="trailing-strings")
+        except ValueError:
+            return
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("content"), str):
+            return
+        name = snapshot.get("name") if isinstance(snapshot.get("name"), str) else ""
+        lines = snapshot["content"].split("\n")
+        complete = len(lines) - 1
+        if complete > self._code_lines_shown:
+            newest = lines[complete - 1].rstrip()
+            if newest.strip():
+                self._line("  " + newest.strip()[:self.display_width - 2])
+            self._code_lines_shown = complete
+            self._code_last_show = now
+            self._status(f"WRITING {name} {complete} LINES")
+
+    # ------------------------------------------------------------------
+    # Tools
+    # ------------------------------------------------------------------
+
+    def _error_result(self, tool_id: str, message: str) -> Dict[str, Any]:
+        return {"type": "tool_result", "tool_use_id": tool_id, "is_error": True, "content": message}
+
+    def _run_tool(self, block) -> Dict[str, Any]:
+        args = block.input if isinstance(block.input, dict) else None
+        if args is None:
+            return self._error_result(block.id, json.dumps({"INVALID_JSON": str(block.input)}))
+        handler = {
+            "write_file": self._tool_write_file,
+            "edit_file": self._tool_edit_file,
+            "read_file": self._tool_read_file,
+            "run_in_emulator": self._tool_run,
+            "emulator_input": self._tool_input,
+            "emulator_memory": self._tool_memory,
+            "deploy_to_apple": self._tool_deploy,
+        }.get(block.name)
+        if not handler:
+            return self._error_result(block.id, f"Unknown tool {block.name}")
+        try:
+            content = handler(args)
+        except ToolError as e:
+            self._line(f"  {str(e).splitlines()[0][:self.display_width - 2]}")
+            return self._error_result(block.id, str(e))
+        except Exception as e:
+            print(f"[Agent] tool {block.name} crashed: {e!r}")
+            return self._error_result(block.id, f"Tool failed: {e}")
+        return {"type": "tool_result", "tool_use_id": block.id, "content": content}
+
+    @staticmethod
+    def _need(args: dict, key: str, kind=str):
+        value = args.get(key)
+        if not isinstance(value, kind):
+            raise ToolError(f"Missing or invalid '{key}'.")
+        return value
+
+    def _path(self, name: str) -> Path:
+        name = name.strip().upper()
+        if not NAME_RE.match(name):
+            raise ToolError(f"Bad file name {name!r}: use letters, digits, '.', '-' (max 30), "
+                            "e.g. GAME.BAS or GAME.S")
+        return WORKSPACE / name
+
+    def _tool_write_file(self, args):
+        path = self._path(self._need(args, "name"))
+        content = self._need(args, "content")
+        path.write_text(content)
+        lines = content.count("\n") + 1
+        self._line(f"  WROTE {path.name} ({lines} LINES)")
+        return f"Wrote {path.name}: {lines} lines, {len(content)} bytes."
+
+    def _tool_edit_file(self, args):
+        path = self._path(self._need(args, "name"))
+        old = self._need(args, "old_text")
+        new = self._need(args, "new_text")
+        if not path.exists():
+            raise ToolError(f"{path.name} doesn't exist.")
+        text = path.read_text()
+        count = text.count(old)
+        if count == 0:
+            raise ToolError(f"old_text not found in {path.name}. Use read_file to see the current text.")
+        if count > 1:
+            raise ToolError(f"old_text appears {count} times in {path.name}; include more context.")
+        at_line = text[:text.index(old)].count("\n") + 1
+        path.write_text(text.replace(old, new))
+        self._line(f"* EDITED {path.name} LINE {at_line}")
+        return f"Edited {path.name} at line {at_line}."
+
+    def _tool_read_file(self, args):
+        name = args.get("name")
+        if not name:
+            files = sorted(p.name for p in WORKSPACE.iterdir() if p.is_file() and p.suffix.upper() in SOURCE_EXTS)
+            return "Workspace files: " + (", ".join(files) if files else "(none)")
+        path = self._path(name)
+        if not path.exists():
+            raise ToolError(f"{path.name} doesn't exist.")
+        lines = path.read_text().split("\n")
+        self._line(f"* READING {path.name}")
+        return "\n".join(f"{i + 1:5}| {l}" for i, l in enumerate(lines[:3000]))
+
+    # --- building -------------------------------------------------------
+
+    def _has_aux(self) -> bool:
+        return bool(getattr(self.session, "has_aux", True)) if self.session else True
+
+    def _can_deploy(self) -> bool:
+        return bool(getattr(self.session, "can_deploy", True)) if self.session else True
+
+    def _build(self, name: str, title: Optional[str] = None) -> deploy.Program:
+        path = self._path(name)
+        if not path.exists():
+            raise ToolError(f"{path.name} doesn't exist - write it first.")
+        source = path.read_text()
+        title = (title or path.stem).strip()[:deploy.NAME_MAX]
+        ext = path.suffix.upper()
+        try:
+            if ext == ".BAS":
+                program = deploy.build_basic(source, title, self._has_aux())
+            elif ext in (".S", ".ASM"):
+                BUILD_DIR.mkdir(exist_ok=True)
+                data, load_addr, labels, _ = deploy.assemble(source, str(BUILD_DIR), path.stem)
+                self._labels = {k: v for k, v in labels.items() if not k.startswith("__")}
+                entry = next((labels[k] for k in ("start", "START", "main", "MAIN") if k in labels), None)
+                program = deploy.build_binary(data, load_addr, entry, title, self._has_aux(), source)
+            else:
+                raise ToolError(f"Don't know how to build {path.name} (use .BAS or .S).")
+        except BuildError as e:
+            raise ToolError(f"Build failed for {path.name}:\n{e}")
+        program.source_name = path.name
+        return program
+
+    # --- emulator ---------------------------------------------------------
+
+    def _bridge(self):
+        from emulator_bridge import get_bridge
+        return get_bridge()
+
+    def _tool_run(self, args):
+        name = self._need(args, "file")
+        wait = args.get("wait", 2.0)
+        wait = min(max(float(wait), 0.2), MAX_WAIT_PER_CALL) if isinstance(wait, (int, float)) else 2.0
+        steps = args.get("steps") or []
+        if not isinstance(steps, list):
+            raise ToolError("steps must be a list.")
+
+        program = self._build(name)
+        self._line("")
+        self._line(f"* TESTING {program.source_name} IN EMULATOR")
+        self._set_phase("TESTING")
+        bridge = self._bridge()
+        started = bridge.run_program(program)
+        if "error" in started:
+            raise ToolError(f"Emulator problem: {started['error']}")
+        self._emulator_ready = True
+
+        looks = []
+        time.sleep(wait)
+        looks.append(("after %.1fs" % wait, bridge.observe()))
+        looks.extend(self._play_steps(bridge, steps))
+        header = f"Built OK. {program.summary()}"
+        return self._report(header, looks)
+
+    def _tool_input(self, args):
+        steps = args.get("steps")
+        if not isinstance(steps, list) or not steps:
+            raise ToolError("steps must be a non-empty list.")
+        if not self._emulator_ready:
+            raise ToolError("Nothing is running - use run_in_emulator first.")
+        self._line("* PLAYING")
+        self._set_phase("PLAYING")
+        looks = self._play_steps(self._bridge(), steps)
+        return self._report("Continued the running program.", looks)
+
+    def _play_steps(self, bridge, steps) -> list:
+        looks = []
+        budget = MAX_WAIT_PER_CALL
+        for i, step in enumerate(steps[:30]):
+            if not isinstance(step, dict):
+                continue
+            keys = step.get("keys") or ""
+            if keys:
+                bridge.send_input(str(keys))
+            wait = step.get("wait", 0.5)
+            wait = min(max(float(wait), 0.0), budget) if isinstance(wait, (int, float)) else 0.5
+            budget -= wait
+            time.sleep(wait)
+            last = i == len(steps) - 1
+            if step.get("look") or last:
+                label = f"after step {i + 1}" + (f" (typed {keys})" if keys else "")
+                looks.append((label, bridge.observe()))
+            if budget <= 0:
+                looks.append(("time budget used up", bridge.observe()))
+                break
+        return looks
+
+    def _report(self, header: str, looks: list) -> list:
+        """Tool result: text for every look, images for the last few."""
+        blocks: List[Dict[str, Any]] = []
+        text = [header]
+        final = looks[-1][1] if looks else None
+        with_images = [i for i, (_, obs) in enumerate(looks) if obs.get("image")]
+        with_images = with_images[-MAX_IMAGES_PER_RESULT:]
+        for i, (label, obs) in enumerate(looks):
+            text.append(f"\n[{label}] {obs['status']} Display: {obs['mode']}.")
+            if obs["mode"].startswith("text") or obs["mode"].endswith("+text"):
+                rows = obs["screen"] if obs["mode"].startswith("text") else obs["screen"][20:]
+                shown = "\n".join(r.rstrip() for r in rows).rstrip()
+                text.append("Text screen:\n" + (shown if shown.strip() else "(blank)"))
+            for p in obs["problems"]:
+                text.append("PROBLEM: " + p)
+            if i in with_images:
+                text.append("(screenshot follows)")
+        blocks.append({"type": "text", "text": "\n".join(text)})
+        for label, obs in (looks[i] for i in with_images):
+            blocks.append({"type": "text", "text": f"Screenshot {label}:"})
+            blocks.append({"type": "image", "source": {
+                "type": "base64", "media_type": "image/png",
+                "data": base64.standard_b64encode(obs["image"]).decode("ascii")}})
+
+        if final:
+            self._show_observation(final)
+        latest_hgr = next((obs["hgr_page"] for _, obs in reversed(looks) if obs.get("hgr_page")), None)
+        if latest_hgr:
+            self._send_preview(latest_hgr)
+        return blocks
+
+    def _show_observation(self, obs: dict):
+        """Let the user peek at what the test machine shows."""
+        self._line("  " + obs["status"])
+        if obs["mode"].startswith("text"):
+            rows = [r.rstrip() for r in obs["screen"] if r.strip()]
+            for r in rows[:6]:
+                self._line("  | " + r[:self.display_width - 4])
+            if len(rows) > 6:
+                self._line(f"  | ({len(rows) - 6} MORE LINES)")
+        elif not obs.get("hgr_page"):
+            self._line(f"  ({obs['mode'].upper()} SCREEN CAPTURED)")
+        for p in obs["problems"]:
+            self._line("  ! " + p)
+
+    def _send_preview(self, hgr_page: bytes):
+        """Push an HGR screenshot to the Apple II (background, newest wins)."""
+        if not self.session or not self._previews_allowed:
+            return
+        if not getattr(self.session, "can_deploy", False):
+            return
+        self._wait_preview()
+        self._line("  (PREVIEW ON YOUR SCREEN - ANY KEY = LOG)")
+        self._preview_thread = threading.Thread(
+            target=self._preview_worker, args=(hgr_page,), daemon=True)
+        self._preview_thread.start()
+
+    def _preview_worker(self, hgr_page: bytes):
+        try:
+            self.session.send_preview(hgr_page)
+        except Exception as e:
+            print(f"[Agent] preview failed: {e}")
+
+    def _wait_preview(self):
+        if self._preview_thread:
+            self._preview_thread.join(timeout=60)
+            self._preview_thread = None
+
+    def _tool_memory(self, args):
+        address = self._need(args, "address", int)
+        count = args.get("count", 64)
+        count = min(max(int(count), 1), 512) if isinstance(count, int) else 64
+        if not 0 <= address <= 0xFFFF:
+            raise ToolError("address must be 0-65535.")
+        if not self._emulator_ready:
+            raise ToolError("Nothing is running - use run_in_emulator first.")
+        bridge = self._bridge()
+        data = bridge.peek_memory(address, count)
+        lines = []
+        for off in range(0, len(data), 16):
+            chunk = data[off:off + 16]
+            lines.append(f"{address + off:04X}: " + " ".join(f"{b:02X}" for b in chunk))
+        cpu = bridge.sock.get_cpu_state()
+        regs = (f"PC=${cpu.get('pc', 0):04X} A=${cpu.get('a', 0):02X} X=${cpu.get('x', 0):02X} "
+                f"Y=${cpu.get('y', 0):02X} SP=${cpu.get('sp', 0):02X} P=${cpu.get('p', 0):02X}")
+        labels = ""
+        if self._labels:
+            near = sorted(self._labels.items(), key=lambda kv: kv[1])[:60]
+            labels = "\nLabels: " + ", ".join(f"{k}=${v:04X}" for k, v in near)
+        self._line(f"* MEMORY ${address:04X}")
+        return regs + "\n" + "\n".join(lines) + labels
+
+    # --- deploy ------------------------------------------------------------
+
+    def _tool_deploy(self, args):
+        name = self._need(args, "file")
+        title = self._need(args, "title")
+        program = self._build(name, title)
+        if not self.session:
+            raise ToolError("No Apple II is connected right now.")
+        self._wait_preview()
+        self._line("")
+        self._line(f"* SENDING {program.name.upper()} TO YOUR APPLE II")
+        self._set_phase("SENDING")
+        result = self.session.deploy_program(program)
+        if program.mode == deploy.MODE_RESIDENT:
+            self._previews_allowed = False   # previews would land on the program
+        self.deploy_history.append(program)
+        self._save_history(program)
+        self._line("  " + result.split(".")[0])
+        return result
+
+    def _save_history(self, program: deploy.Program):
+        try:
+            HISTORY_DIR.mkdir(exist_ok=True)
+            n = len(list(HISTORY_DIR.iterdir())) + 1
+            src = WORKSPACE / program.source_name
+            shutil.copy(src, HISTORY_DIR / f"{n:03d}_{program.source_name}")
+        except Exception as e:
+            print(f"[Agent] history save failed: {e}")
+
+    def _shutdown_test_emulator(self):
+        """Free the test emulator's CPU between requests."""
+        if not self._emulator_ready:
+            return
+        try:
+            bridge = self._bridge()
+            if bridge.emulator_running:
+                bridge.shutdown()
+        except Exception:
+            pass
+        self._emulator_ready = False
 
 
-# Singleton for use in unified_proxy
+class ToolError(Exception):
+    """A tool failed in a way Claude can fix. The message goes back to Claude."""
+
+
+# Kept for older imports
 _agentic_instance: Optional[AgenticClaude] = None
 
-def get_agentic_claude(send_to_apple2, send_status, send_code, mcp_call=None) -> AgenticClaude:
-    """Get or create the agentic Claude instance."""
+
+def get_agentic_claude(*_args, **_kwargs) -> AgenticClaude:
     global _agentic_instance
     if _agentic_instance is None:
-        _agentic_instance = AgenticClaude(send_to_apple2, send_status, send_code, mcp_call)
+        _agentic_instance = AgenticClaude()
     return _agentic_instance
