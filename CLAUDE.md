@@ -421,6 +421,8 @@ BOBBIN_U2_RESET_ON_RESET=1 .venv/bin/python tests/e2e_agent.py           # Uther
 - **Each test has its own discovery channel**: its Bobbin gets `BOBBIN_U2_UDP_PORT=<port+10000>` (Bobbin sends the virtual network's UDP there instead of 6502) and its proxy `APPLE2_DISCOVERY_PORT=<port+10000>`. Without that, a test's Apple II found the everyday proxy on 6502 (it happened). Ports: e2e/soak 6599, setup 6598, display 6597, live 6596; the everyday proxy is 6502. Still run them one at a time (they share `/tmp` work dirs).
 - Test proxies use `APPLE2_PROXY_CONTROL_DIR` so they never touch `/tmp/claude/proxy.pid` (the everyday proxy's).
 - Bobbin's virtual network behaves like a real host (536-byte segments, the Apple's window, resends, duplicate drops) - it caught an ACK bug the old one hid. If something passes only with small segments, it's broken.
+- `BOBBIN_U2_CORRUPT_LEN_EVERY=n` misreports every nth frame's length in the W5100 RX ring (a misread header): the stock IP65 driver then misreads every frame after; ours skips to the next frame (`libs/ip65/drivers/w5100.s`).
+- Stall reports from the real Apple II (watchdog `/RESYNC`) land in `logs/stall_reports.log`, decoded.
 - `BOBBIN_U2_CORRUPT_EVERY=n` garbles one byte of every nth virtual TCP segment, as a flaky bus on the real //e did (IP65 didn't check TCP checksums: the first real deploy stalled and lost a packet). `run_all.sh` runs e2e with n=5.
 - Test disks write a 10-byte `CLAUDECONF` with the stall watchdog **off** (byte 10 = 0): Bobbin runs unthrottled, so 20 emulated seconds pass in half a real one. `e2e_display.py` tests the watchdog on its own (2 s).
 
