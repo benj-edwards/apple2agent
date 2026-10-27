@@ -24,11 +24,11 @@ def test_proxy_connection():
     proto = A2PProtocol()
 
     # Connect to proxy
-    print("Connecting to proxy at localhost:8080...")
+    print("Connecting to proxy at localhost:6502...")
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(10)
-        sock.connect(('localhost', 8080))
+        sock.connect(('localhost', 6502))
         print("Connected!\n")
     except ConnectionRefusedError:
         print("ERROR: Could not connect. Is the proxy running?")
@@ -122,7 +122,7 @@ def test_code_request():
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(10)
-        sock.connect(('localhost', 8080))
+        sock.connect(('localhost', 6502))
         print("Connected!\n")
     except ConnectionRefusedError:
         print("ERROR: Could not connect")
@@ -195,7 +195,7 @@ def test_code_request():
 
 
 if __name__ == '__main__':
-    print("Testing proxy at localhost:8080\n")
+    print("Testing proxy at localhost:6502\n")
     print("Make sure proxy is running: python3 proxy/unified_proxy.py\n")
 
     success = test_proxy_connection()
