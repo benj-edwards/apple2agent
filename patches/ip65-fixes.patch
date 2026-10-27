@@ -1,8 +1,109 @@
+diff --git a/drivers/uthernet2.s b/drivers/uthernet2.s
+index cbbd24d..2c209de 100644
+--- a/drivers/uthernet2.s
++++ b/drivers/uthernet2.s
+@@ -1,6 +1,7 @@
+ ; Uthernet II driver
+ 
+ .export _w5100_name
++.export w5100_rx_resyncs        ; (apple2agent) bad RX frame headers skipped
+ 
+ 
+ __APPLE2__ = 1
+diff --git a/drivers/w5100.s b/drivers/w5100.s
+index 2e3f5a0..3ca73d6 100644
+--- a/drivers/w5100.s
++++ b/drivers/w5100.s
+@@ -248,7 +248,10 @@ fixup15:lda data
+ :	ldy #$26		; Socket RX Received Size Register
+ 	jsr set_addrsocket0
+ fixup16:lda data		; Hibyte
+-fixup17:ora data		; Lobyte
++	sta rsr+1
++fixup17:lda data		; Lobyte
++	sta rsr
++	ora rsr+1
+ 	beq :--
+ 
+ 	; Process the incoming data
+@@ -275,6 +278,40 @@ fixup17:ora data		; Lobyte
+ 	jsr get_datacheckaddr	; Lobyte
+ 	sta adv
+ 
++	; A length no frame can have (or more than has arrived) means the read
++	; pointer is off a frame boundary - one misread header on a flaky bus
++	; does it, and every frame after would be misread. Skip all that's
++	; arrived and pick up at the next frame (TCP resends what's lost).
++	lda adv
++	cmp #<16
++	lda adv+1
++	sbc #>16
++	bcc @bad_header		; shorter than an Ethernet header (+2)
++	lda #<1520
++	cmp adv
++	lda #>1520
++	sbc adv+1
++	bcc @bad_header		; longer than any frame
++	lda rsr
++	cmp adv
++	lda rsr+1
++	sbc adv+1
++	bcs @header_ok		; and no more than has arrived
++@bad_header:
++	inc w5100_rx_resyncs
++	bne :+
++	inc w5100_rx_resyncs+1
++:	lda rsr
++	sta adv
++	lda rsr+1
++	sta adv+1
++	lda #$00
++	sta len
++	sta len+1
++	jmp recv_done
++@header_ok:
++	lda adv			; (the code below starts from the length's low byte in A)
++
+ 	; Subtract 2byte header and set length
+ 	sec
+ 	sbc #<$0002
+@@ -302,7 +339,9 @@ fixup17:ora data		; Lobyte
+ :	jsr mov_data
+ 
+ 	; Set parameters for common code
+-:	lda #$40		; RECV
++:
++recv_done:
++	lda #$40		; RECV
+ 	ldy #$28		; Socket 0 RX Read Pointer Register
+ 
+ 	; Advance pointer register
+@@ -533,3 +572,9 @@ fixup32:sta data
+ 	rts
+ 
+ ;---------------------------------------------------------------------
++
++	.bss
++
++rsr:	.res	2		; Socket 0 RX Received Size Register, this poll
++w5100_rx_resyncs:
++	.res	2		; times a bad frame header made poll skip the RX ring
 diff --git a/ip65/tcp.s b/ip65/tcp.s
-index 7e306c3..63f77c6 100644
+index 7e306c3..49ef0ae 100644
 --- a/ip65/tcp.s
 +++ b/ip65/tcp.s
-@@ -73,6 +73,7 @@ tcp_cxn_state_syn_sent    = 2   ; (waiting for an inbound SYN/ACK)
+@@ -14,6 +14,10 @@ MAX_TCP_PACKETS_SENT = 8        ; timeout after sending 8 messages will be about
+ .import ip65_error
+ 
+ .export tcp_init
++.export tcp_rx_count                            ; (apple2agent) for the stall report
++.export tcp_bad_cksum
++.export tcp_connect_ack_number
++.export tcp_connect_last_received_seq_number
+ .export tcp_process
+ .export tcp_connect
+ .export tcp_callback
+@@ -73,6 +77,7 @@ tcp_cxn_state_syn_sent    = 2   ; (waiting for an inbound SYN/ACK)
  tcp_cxn_state_established = 3
  
  ; tcp packet offsets
@@ -10,16 +111,18 @@ index 7e306c3..63f77c6 100644
  tcp_inp  = ip_inp  + ip_data    ; pointer to tcp packet inside inbound ethernet frame
  tcp_outp = ip_outp + ip_data    ; pointer to tcp packet inside outbound ethernet frame
  tcp_src_port       =  0         ; offset of source port field in tcp packet
-@@ -133,6 +134,8 @@ tcp_connect_ip:                         .res 4  ; ip address of remote server to
+@@ -133,6 +138,10 @@ tcp_connect_ip:                         .res 4  ; ip address of remote server to
  
  tcp_timer:              .res 1
  tcp_loop_count:         .res 1
 +tcp_cksum_save:         .res 4  ; ttl, proto, ip header checksum while the pseudo header sits there
 +tcp_cksum_result:       .res 2
++tcp_rx_count:           .res 2  ; inbound TCP segments
++tcp_bad_cksum:          .res 2  ; ...that failed the checksum
  tcp_packet_sent_count:  .res 1
  
  
-@@ -412,10 +415,11 @@ tcp_send:
+@@ -412,10 +421,11 @@ tcp_send:
    sta ip65_error
    sec
    rts
@@ -33,7 +136,7 @@ index 7e306c3..63f77c6 100644
    ; increment the expected sequence number
    ldax #tcp_connect_expected_ack_number
    stax acc32
-@@ -462,6 +466,9 @@ tcp_send:
+@@ -462,6 +472,9 @@ tcp_send:
    sta tcp_state
    rts
  @no_abort:
@@ -43,7 +146,7 @@ index 7e306c3..63f77c6 100644
    ldax #tcp_connect_last_ack
    stax acc32
    ldax #tcp_connect_expected_ack_number
-@@ -657,6 +664,46 @@ check_current_connection:
+@@ -657,6 +670,46 @@ check_current_connection:
    clc
    rts
  
@@ -90,7 +193,7 @@ index 7e306c3..63f77c6 100644
  ; process incoming tcp packet
  ; called automatically by ip_process if "ip.s" was compiled with -DTCP
  ; inputs:
-@@ -665,7 +712,16 @@ check_current_connection:
+@@ -665,7 +718,22 @@ check_current_connection:
  ; none but if connection was found, an outbound message may be created, overwriting eth_outp
  ; also tcp_state and other tcp variables may be modified
  tcp_process:
@@ -101,9 +204,15 @@ index 7e306c3..63f77c6 100644
 +  ; which stalls the connection for good (the peer ignores an ACK beyond what
 +  ; it sent; we refuse its resends as old). A bad segment is dropped without an
 +  ; ACK, and the peer sends it again.
-+  jsr tcp_verify_checksum
-+  beq :+
-+  rts
++  inc tcp_rx_count
++  bne :+
++  inc tcp_rx_count+1
++: jsr tcp_verify_checksum
++  beq :++
++  inc tcp_bad_cksum
++  bne :+
++  inc tcp_bad_cksum+1
++: rts
 +: lda #tcp_flag_RST
    bit tcp_inp+tcp_flags_field
    beq @not_reset

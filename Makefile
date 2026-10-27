@@ -5,6 +5,8 @@
 ASM_DIR = asm
 BUILD_DIR = build
 LIBS_DIR = libs/ip65
+# Patched IP65 (patches/ip65-fixes.patch): a change to them must relink the agent
+IP65_LIBS = $(LIBS_DIR)/ip65_tcp.lib $(LIBS_DIR)/drivers/a2uther2.lib
 DISKS_DIR = disks
 TOOLS_DIR = tools
 PROXY_DIR = proxy
@@ -71,7 +73,7 @@ $(AGENT_OBJ): $(AGENT_SRC) $(ASM_DIR)/agent_deploy.s $(ASM_DIR)/agent_screen.s
 	$(CA65) --cpu 6502 -I $(LIBS_DIR)/inc -I $(ASM_DIR) -o $@ $<
 
 # Link Agent
-$(AGENT_BIN): $(AGENT_OBJ) $(CONFIG)
+$(AGENT_BIN): $(AGENT_OBJ) $(CONFIG) $(IP65_LIBS)
 	$(LD65) -C $(CONFIG) -o $@ $(AGENT_OBJ) \
 		$(LIBS_DIR)/ip65_tcp.lib \
 		$(LIBS_DIR)/drivers/a2uther2.lib \
@@ -83,7 +85,7 @@ $(SYSLOAD_OBJ): $(SYSLOAD_SRC)
 	@mkdir -p $(BUILD_DIR)
 	$(CA65) --cpu 6502 -o $@ $<
 
-$(AGENT_SYS): $(AGENT_OBJ) $(SYSLOAD_OBJ) $(SYS_CONFIG)
+$(AGENT_SYS): $(AGENT_OBJ) $(SYSLOAD_OBJ) $(SYS_CONFIG) $(IP65_LIBS)
 	$(LD65) -C $(SYS_CONFIG) -o $@ $(SYSLOAD_OBJ) $(AGENT_OBJ) \
 		$(LIBS_DIR)/ip65_tcp.lib \
 		$(LIBS_DIR)/drivers/a2uther2.lib \

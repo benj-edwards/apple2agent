@@ -40,6 +40,9 @@
 .import print_a
 .import get_key
 .import ip65_process
+.import tcp_rx_count, tcp_bad_cksum          ; (patched IP65) for the stall report
+.import tcp_connect_ack_number, tcp_connect_last_received_seq_number
+.import w5100_rx_resyncs
 .import tcp_connect
 .import tcp_connect_ip
 .import tcp_callback
@@ -2500,6 +2503,7 @@ resync_connection:
 @try:
         ldax #msg_stalled
         jsr print_status
+        jsr build_stall_report  ; what the stall looks like from here, first
         lda #1                  ; a W5100 left in a bad state is what this is for
         sta net_needs_init
         jsr ensure_connected
@@ -2507,13 +2511,13 @@ resync_connection:
         lda #0                  ; the new connection starts on a packet boundary
         sta recv_state
         sta in_callback
-        ldx #RESYNC_CMD_LEN-1
-:       lda resync_cmd,x
+        ldx #0                  ; "/RESYNC" + the report
+:       lda diag_buf,x
         sta input_buffer,x
-        dex
-        bpl :-
-        lda #RESYNC_CMD_LEN
-        sta input_len
+        inx
+        cpx diag_len
+        bcc :-
+        stx input_len
         jsr send_chat_packet
 @later:
         clc
@@ -2522,6 +2526,118 @@ resync_connection:
 resync_cmd:
         .byte "/RESYNC"
 RESYNC_CMD_LEN = * - resync_cmd
+
+; The stall report, in hex (the proxy decodes and logs it):
+;   n segments since the last good packet   t/b all segments / bad checksums
+;   h W5100 RX ring skips (bad frame header) a A2P packets with a bad checksum
+;   s socket 0 status   q bytes waiting in its RX ring
+;   e/l the sequence number we expect / last got (low 16 bits)
+W5100_ADDR      = W5100_MODE + 1        ; address hi, lo; then data
+W5100_DATA      = W5100_MODE + 3
+
+build_stall_report:
+        lda #0
+        sta diag_len
+        ldx #0
+:       lda resync_cmd,x
+        jsr diag_put
+        inx
+        cpx #RESYNC_CMD_LEN
+        bcc :-
+        lda #'N'
+        jsr diag_field
+        sec
+        lda tcp_rx_count
+        sbc rx_at_packet
+        tax
+        lda tcp_rx_count+1
+        sbc rx_at_packet+1
+        jsr diag_hex
+        txa
+        jsr diag_hex
+        lda #'T'
+        ldx #<tcp_rx_count
+        ldy #>tcp_rx_count
+        jsr diag_word
+        lda #'B'
+        ldx #<tcp_bad_cksum
+        ldy #>tcp_bad_cksum
+        jsr diag_word
+        lda #'H'
+        ldx #<w5100_rx_resyncs
+        ldy #>w5100_rx_resyncs
+        jsr diag_word
+        lda #'A'
+        jsr diag_field
+        lda a2p_bad
+        jsr diag_hex
+        lda #'S'                ; W5100 socket 0 status ($0403)
+        jsr diag_field
+        lda #$04
+        sta W5100_ADDR
+        lda #$03
+        sta W5100_ADDR+1
+        lda W5100_DATA
+        jsr diag_hex
+        lda #'Q'                ; socket 0 RX received size ($0426, hi then lo)
+        jsr diag_field
+        lda #$04
+        sta W5100_ADDR
+        lda #$26
+        sta W5100_ADDR+1
+        lda W5100_DATA
+        jsr diag_hex
+        lda W5100_DATA          ; (auto-increment)
+        jsr diag_hex
+        lda #'E'
+        ldx #<tcp_connect_ack_number
+        ldy #>tcp_connect_ack_number
+        jsr diag_word
+        lda #'L'
+        ldx #<tcp_connect_last_received_seq_number
+        ldy #>tcp_connect_last_received_seq_number
+        jmp diag_word
+
+; " X=hhhh" for the little-endian word at Y:X (A = the letter)
+diag_word:
+        stx src_ptr
+        sty src_ptr+1
+        jsr diag_field
+        ldy #1
+        lda (src_ptr),y
+        jsr diag_hex
+        ldy #0
+        lda (src_ptr),y
+        jmp diag_hex
+
+diag_field:                     ; " X="
+        pha
+        lda #' '
+        jsr diag_put
+        pla
+        jsr diag_put
+        lda #'='
+        jmp diag_put
+
+diag_hex:                       ; two hex digits of A
+        pha
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr @digit
+        pla
+        and #$0F
+@digit:
+        cmp #10
+        bcc :+
+        adc #6                  ; (C set: +7 -> 'A')
+:       adc #'0'
+diag_put:                       ; append A (keeps X)
+        ldy diag_len
+        sta diag_buf,y
+        inc diag_len
+        rts
 
 ;-------------------------------------------------------------------------------
 ; Empty the input line while Claude works (the proxy echoes the request,
@@ -2820,6 +2936,7 @@ recv_callback:
         ; the middle of a program, that program must not run (handle_run)
         lda #1
         sta packet_lost
+        inc a2p_bad
         lda #STATE_MAGIC_0
         sta recv_state
         jmp @process_loop
@@ -2837,6 +2954,10 @@ process_packet:
         lda #0
         sta silent_frames        ; (the stall watchdog)
         sta silent_frames+1
+        lda tcp_rx_count         ; (its report: segments since this one)
+        sta rx_at_packet
+        lda tcp_rx_count+1
+        sta rx_at_packet+1
 
         ; Queue ACK for later (don't send from callback)
         ldx pending_ack_count
@@ -4186,6 +4307,10 @@ temp_w:         .res 2
 vbl_prev:       .res 1
 resync_tries:   .res 1
 packet_lost:    .res 1          ; a packet failed its checksum since the DEPLOY
+a2p_bad:        .res 1          ; ...how many ever (the stall report)
+rx_at_packet:   .res 2          ; tcp_rx_count at the last good packet
+diag_len:       .res 1
+diag_buf:       .res 80         ; the stall report (/RESYNC ...)
 
 ; Code handling
 expecting_code: .res 1
